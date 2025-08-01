@@ -16,5 +16,8 @@
     "react": "^18",
     "react-dom": "^18",
     "serialport": "^13.0.0"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
   }
 }
