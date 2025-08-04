@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import MergedPlateTable from './MergedPlateTable'; // Import the new merged plate component
 
 // Helper function to generate an empty plate data structure for the merged table
@@ -20,66 +20,50 @@ const generateMergedPlateData = (baseLayout) => {
     .map(() =>
       Array(totalCols)
         .fill(null)
-        .map(() => ({ method: null, parameters: {} }))
+        // Initialize wells with an object containing all parameter keys with empty strings
+        .map(() => ({
+          stepAmount: '',
+          delayBetweenStep: '',
+          lightTime: '',
+          exposureTime: '',
+          switchPlate: '',
+        }))
     );
 };
-
-// Available methods with their parameter options
-const availableMethods = [
-  { name: 'Aspirate', params: ['volume', 'speed'] },
-  { name: 'Dispense', params: ['volume', 'speed'] },
-  { name: 'Mix', params: ['cycles', 'speed'] },
-  { name: 'Incubate', params: ['time', 'temperature'] },
-  { name: 'Custom', params: ['command', 'steps'] },
-];
 
 const RoutineBuilder = () => {
   // State for the single merged plate
   const [plate, setPlate] = useState({
-    id: 1, // Still useful for identification, even if only one
-    baseLayout: '96-well', // Can be '96-well' or '48-well'
+    id: 1,
+    baseLayout: '96-well',
     data: generateMergedPlateData('96-well'),
   });
 
-  const [draggedMethod, setDraggedMethod] = useState(null); // For individual well drag-and-drop
-  const [selectedMethod, setSelectedMethod] = useState(null); // For applying to whole plate
-  const [selectedWellCoords, setSelectedWellCoords] = useState(null); // { rowIndex, colIndex } of selected well
-  const [copiedWellData, setCopiedWellData] = useState(null); // { method, parameters } of copied well
+  // State for the coordinates of the currently selected well
+  const [selectedWellCoords, setSelectedWellCoords] = useState(null);
+  // State for the data copied from a well
+  const [copiedWellData, setCopiedWellData] = useState(null);
 
-  // Drag and drop handlers for methods (from palette)
-  const handleDragStart = (method) => (e) => {
-    setDraggedMethod(method);
-    setSelectedMethod(method); // Also set as selected method when dragged
-  };
+  // States for routine repetition
+  const [repeatFrequency, setRepeatFrequency] = useState('daily');
+  const [repeatTime, setRepeatTime] = useState('09:00'); // Default time
 
-  // Click handler for methods (from palette)
-  const handleMethodClick = (method) => () => {
-    setSelectedMethod(method);
-    setDraggedMethod(null); // Clear dragged method if clicked
-  };
-
-  // Drop handler for wells (passed to MergedPlateTable)
-  const handleDrop = (rowIndex, colIndex) => (e) => {
-    e.preventDefault();
-    if (!draggedMethod) return;
-
-    setPlate((prevPlate) => {
-      const newData = [...prevPlate.data];
-      newData[rowIndex][colIndex] = { ...draggedMethod, parameters: {} };
-      return { ...prevPlate, data: newData };
-    });
-    setDraggedMethod(null); // Clear dragged method after drop
-  };
-
-  // Well customization handler (passed to MergedPlateTable)
-  const handleWellCustomization = (rowIndex, colIndex, param, value) => {
-    setPlate((prevPlate) => {
-      const newData = [...prevPlate.data];
-      const well = { ...newData[rowIndex][colIndex] };
-      well.parameters[param] = value;
-      newData[rowIndex][colIndex] = well;
-      return { ...prevPlate, data: newData };
-    });
+  // Handle individual input changes for well parameters
+  // This function now directly updates the plate data for the selected well
+  const handleWellInputChange = (paramName) => (e) => {
+    const value = e.target.value;
+    if (selectedWellCoords) {
+      setPlate((prevPlate) => {
+        const newData = [...prevPlate.data];
+        const { rowIndex, colIndex } = selectedWellCoords;
+        // Create a deep copy of the well's data to ensure immutability
+        const updatedWell = { ...newData[rowIndex][colIndex],
+          [paramName]: value
+        };
+        newData[rowIndex][colIndex] = updatedWell;
+        return { ...prevPlate, data: newData };
+      });
+    }
   };
 
   // Base plate layout customization (96-well vs 48-well)
@@ -89,30 +73,10 @@ const RoutineBuilder = () => {
       baseLayout: newLayout,
       data: generateMergedPlateData(newLayout), // Regenerate data for new layout
     }));
+    setSelectedWellCoords(null); // Deselect well on layout change
   };
 
-  // Apply selected method to all wells of the merged plate
-  const handleApplyMethodToAllWells = () => {
-    if (!selectedMethod) {
-      alert('Please select a method first.');
-      return;
-    }
-
-    setPlate((prevPlate) => {
-      const [totalRows, totalCols] = [prevPlate.data.length, prevPlate.data[0].length];
-      const newPlateData = Array(totalRows)
-        .fill(null)
-        .map(() =>
-          Array(totalCols)
-            .fill(null)
-            .map(() => ({ ...selectedMethod, parameters: {} }))
-        );
-      return { ...prevPlate, data: newPlateData };
-    });
-    alert(`Method "${selectedMethod.name}" applied to all wells.`);
-  };
-
-  // Handle well selection for copy/paste
+  // Handle well selection for copy/paste and value input
   const handleWellSelect = (rowIndex, colIndex) => {
     setSelectedWellCoords({ rowIndex, colIndex });
   };
@@ -125,7 +89,8 @@ const RoutineBuilder = () => {
     }
     const { rowIndex, colIndex } = selectedWellCoords;
     const wellContent = plate.data[rowIndex][colIndex];
-    setCopiedWellData({ ...wellContent, parameters: { ...wellContent.parameters } }); // Deep copy
+    // Deep copy all properties of the well
+    setCopiedWellData({ ...wellContent });
     alert(`Content of well ${String.fromCharCode(65 + rowIndex)}${colIndex + 1} copied.`);
   };
 
@@ -143,7 +108,8 @@ const RoutineBuilder = () => {
     setPlate((prevPlate) => {
       const newData = [...prevPlate.data];
       const { rowIndex, colIndex } = selectedWellCoords;
-      newData[rowIndex][colIndex] = { ...copiedWellData, parameters: { ...copiedWellData.parameters } }; // Deep paste
+      // Deep paste all properties
+      newData[rowIndex][colIndex] = { ...copiedWellData };
       return { ...prevPlate, data: newData };
     });
     alert(`Content pasted to well ${String.fromCharCode(65 + selectedWellCoords.rowIndex)}${selectedWellCoords.colIndex + 1}.`);
@@ -151,17 +117,34 @@ const RoutineBuilder = () => {
 
   // Save routine to a text file
   const handleSaveRoutine = () => {
+    const flattenedWells = [];
+    plate.data.forEach((row, rowIndex) => {
+      row.forEach((well, colIndex) => {
+        const wellId = `${String.fromCharCode(65 + rowIndex)}${colIndex + 1}`;
+        // Only include well if it has any non-empty parameter
+        const hasContent = Object.values(well).some(value => value !== '');
+        if (hasContent) {
+          flattenedWells.push({
+            well: wellId,
+            Step: well.stepAmount || '',
+            delay: well.delayBetweenStep || '',
+            LT: well.lightTime || '',
+            exposure: well.exposureTime || '',
+            switch: well.switchPlate || '',
+          });
+        }
+      });
+    });
+
     const routineData = {
-      plate: {
-        id: plate.id,
-        baseLayout: plate.baseLayout,
-        // Flatten the 2D array of wells into a 1D array for simpler storage/parsing
-        wells: plate.data.flat().map(well => ({
-          method: well.method,
-          parameters: well.parameters
-        }))
-      }
+      plateType: plate.baseLayout,
+      routineSchedule: {
+        repeatFrequency: repeatFrequency,
+        repeatTime: repeatTime,
+      },
+      wells: flattenedWells,
     };
+
     const routineString = JSON.stringify(routineData, null, 2);
     const blob = new Blob([routineString], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -204,6 +187,22 @@ const RoutineBuilder = () => {
     }
   };
 
+  // Get the current well's values for display in input fields
+  const getCurrentWellValues = () => {
+    if (selectedWellCoords) {
+      const { rowIndex, colIndex } = selectedWellCoords;
+      return plate.data[rowIndex][colIndex];
+    }
+    return {
+      stepAmount: '',
+      delayBetweenStep: '',
+      lightTime: '',
+      exposureTime: '',
+      switchPlate: '',
+    };
+  };
+  const currentWellValues = getCurrentWellValues();
+
   return (
     <div className="routine-builder-container">
       <style>{`
@@ -222,13 +221,11 @@ const RoutineBuilder = () => {
         }
 
         .control-panel {
-          width: 280px;
           background-color: #ffffff;
           box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
           padding: 1.5rem;
           display: flex;
           flex-direction: column;
-          gap: 1.5rem;
           border-radius: 0.75rem; /* Rounded all corners */
           overflow-y: auto; /* Allow control panel to scroll if content is long */
           flex-shrink: 0; /* Prevent panel from shrinking */
@@ -251,37 +248,33 @@ const RoutineBuilder = () => {
           text-align: center;
         }
 
-        .methods-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+        .input-section {
+          display: flex;
+          flex-direction: column;
           gap: 0.75rem;
         }
 
-        .method-item {
-          padding: 0.75rem 0.5rem;
-          border: 1px solid #a78bfa;
-          border-radius: 0.5rem;
-          cursor: grab;
-          background-color: #ede9fe;
-          color: #5b21b6;
-          font-weight: 600;
-          text-align: center;
-          transition: all 0.2s ease-in-out;
-          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        .input-group {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
         }
 
-        .method-item:hover {
-          background-color: #c4b5fd;
-          color: #4c1d95;
-          transform: translateY(-2px);
-          box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        .input-group label {
+          font-size: 0.9rem;
+          color: #374151;
+          flex-shrink: 0;
+          width: 100px; /* Fixed width for labels */
+          text-align: right;
         }
 
-        .method-item.selected-method {
-          border-color: #3b82f6;
-          background-color: #dbeafe;
-          color: #1e40af;
-          box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5);
+        .value-input {
+          padding: 0.5rem; /* Smaller padding */
+          border: 1px solid #d1d5db;
+          border-radius: 0.3rem; /* Slightly smaller border radius */
+          font-size: 0.9rem; /* Smaller font size */
+          flex-grow: 1; /* Allow input to take remaining space */
+          box-sizing: border-box;
         }
 
         .control-buttons-group {
@@ -329,13 +322,6 @@ const RoutineBuilder = () => {
           background-color: #7c3aed;
         }
 
-        .apply-method-button {
-          background-color: #3b82f6;
-        }
-        .apply-method-button:hover:not(:disabled) {
-          background-color: #2563eb;
-        }
-
         .copy-paste-button {
           background-color: #f59e0b;
         }
@@ -353,8 +339,8 @@ const RoutineBuilder = () => {
 
         .layout-selector-group {
             display: flex;
+            color: #1f2937;
             flex-direction: column;
-            gap: 0.5rem;
             align-items: center;
         }
 
@@ -363,33 +349,34 @@ const RoutineBuilder = () => {
             border: 1px solid #d1d5db;
             border-radius: 0.5rem;
             background-color: white;
-            font-size: 0.9rem;
             cursor: pointer;
             width: 100%;
             text-align: center;
         }
+
+        .repeat-schedule-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .repeat-schedule-group .input-group {
+            width: 100%;
+            justify-content: space-between;
+        }
+
+        .repeat-schedule-group select,
+        .repeat-schedule-group input[type="time"] {
+            padding: 0.5rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.3rem;
+            font-size: 0.9rem;
+            flex-grow: 1;
+            box-sizing: border-box;
+        }
       `}</style>
       <div className="control-panel">
-        <h1 className="header">Plate Routine Builder</h1>
-
-        {/* Methods Palette */}
-        <div className="panel-section">
-          <h2>Available Methods</h2>
-          <div className="methods-grid">
-            {availableMethods.map((method, index) => (
-              <div
-                key={index}
-                draggable
-                onDragStart={handleDragStart(method)}
-                onClick={handleMethodClick(method)}
-                className={`method-item ${selectedMethod && selectedMethod.name === method.name ? 'selected-method' : ''}`}
-              >
-                {method.name}
-              </div>
-            ))}
-          </div>
-        </div>
-
         {/* Layout Selection */}
         <div className="panel-section layout-selector-group">
             <h2>Plate Layout</h2>
@@ -403,17 +390,100 @@ const RoutineBuilder = () => {
             </select>
         </div>
 
+        {/* Value Input Section */}
+        <div className="panel-section input-section">
+          <h2>Well Parameters</h2>
+          <div className="input-group">
+            <label htmlFor="stepAmount">Step Amount:</label>
+            <input
+              id="stepAmount"
+              type="text"
+              value={currentWellValues.stepAmount}
+              onChange={handleWellInputChange('stepAmount')}
+              placeholder="e.g., 100"
+              className="value-input"
+              disabled={!selectedWellCoords}
+            />
+          </div>
+          <div className="input-group">
+            <label htmlFor="delayBetweenStep">Delay Between Step:</label>
+            <input
+              id="delayBetweenStep"
+              type="text"
+              value={currentWellValues.delayBetweenStep}
+              onChange={handleWellInputChange('delayBetweenStep')}
+              placeholder="e.g., 500ms"
+              className="value-input"
+              disabled={!selectedWellCoords}
+            />
+          </div>
+          <div className="input-group">
+            <label htmlFor="lightTime">Light Time:</label>
+            <input
+              id="lightTime"
+              type="text"
+              value={currentWellValues.lightTime}
+              onChange={handleWellInputChange('lightTime')}
+              placeholder="e.g., 60s"
+              className="value-input"
+              disabled={!selectedWellCoords}
+            />
+          </div>
+          <div className="input-group">
+            <label htmlFor="exposureTime">Exposure Time:</label>
+            <input
+              id="exposureTime"
+              type="text"
+              value={currentWellValues.exposureTime}
+              onChange={handleWellInputChange('exposureTime')}
+              placeholder="e.g., 100ms"
+              className="value-input"
+              disabled={!selectedWellCoords}
+            />
+          </div>
+          <div className="input-group">
+            <label htmlFor="switchPlate">Switch Plate:</label>
+            <input
+              id="switchPlate"
+              type="text"
+              value={currentWellValues.switchPlate}
+              onChange={handleWellInputChange('switchPlate')}
+              placeholder="e.g., Plate 2"
+              className="value-input"
+              disabled={!selectedWellCoords}
+            />
+          </div>
+        </div>
+
+        {/* Routine Repetition Schedule */}
+        <div className="panel-section repeat-schedule-group">
+            <h2>Routine Schedule</h2>
+            <div className="input-group">
+                <label htmlFor="repeatFrequency">Repeat every:</label>
+                <select
+                    id="repeatFrequency"
+                    value={repeatFrequency}
+                    onChange={(e) => setRepeatFrequency(e.target.value)}
+                >
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                </select>
+            </div>
+            <div className="input-group">
+                <label htmlFor="repeatTime">At time:</label>
+                <input
+                    id="repeatTime"
+                    type="time"
+                    value={repeatTime}
+                    onChange={(e) => setRepeatTime(e.target.value)}
+                />
+            </div>
+        </div>
+
         {/* Global Controls */}
         <div className="panel-section control-buttons-group">
           <h2>Routine Actions</h2>
-          <button
-            onClick={handleApplyMethodToAllWells}
-            disabled={!selectedMethod}
-            className="control-button apply-method-button"
-          >
-            Apply "{selectedMethod ? selectedMethod.name : 'Method'}" to All Wells
-          </button>
-
           <button
             onClick={handleCopyWell}
             disabled={!selectedWellCoords}
@@ -450,8 +520,6 @@ const RoutineBuilder = () => {
       {/* Merged Plate Table Display Area */}
       <MergedPlateTable
         plate={plate}
-        handleDrop={handleDrop}
-        handleWellCustomization={handleWellCustomization}
         selectedWellCoords={selectedWellCoords}
         onWellSelect={handleWellSelect}
       />
