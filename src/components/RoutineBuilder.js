@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import MergedPlateTable from './MergedPlateTable'; // Import the new merged plate component
+import { wellSchema } from './plateSchema'; // Import the schema for default values
 
 // Helper function to generate an empty plate data structure for the merged table
 const generateMergedPlateData = (baseLayout) => {
@@ -15,19 +16,18 @@ const generateMergedPlateData = (baseLayout) => {
   const totalRows = baseRows * 2; // 2x2 quadrant
   const totalCols = baseCols * 2; // 2x2 quadrant
 
+  // Initialize wells with an object containing all parameter keys with default values from schema
+  const defaultWellData = Object.keys(wellSchema.properties).reduce((acc, key) => {
+    acc[key] = wellSchema.properties[key].default;
+    return acc;
+  }, {});
+
   return Array(totalRows)
     .fill(null)
     .map(() =>
       Array(totalCols)
         .fill(null)
-        // Initialize wells with an object containing all parameter keys with empty strings
-        .map(() => ({
-          stepAmount: '',
-          delayBetweenStep: '',
-          lightTime: '',
-          exposureTime: '',
-          switchPlate: '',
-        }))
+        .map(() => ({ ...defaultWellData })) // Use spread to create a new object for each well
     );
 };
 
@@ -39,29 +39,38 @@ const RoutineBuilder = () => {
     data: generateMergedPlateData('96-well'),
   });
 
-  // State for the coordinates of the currently selected well
+  // State for the coordinates of the currently selected well (for single well input/copy source)
   const [selectedWellCoords, setSelectedWellCoords] = useState(null);
   // State for the data copied from a well
   const [copiedWellData, setCopiedWellData] = useState(null);
+  // State for the cells in the last dragged range (for paste target)
+  const [lastDraggedRangeCells, setLastDraggedRangeCells] = useState([]);
 
   // States for routine repetition
   const [repeatFrequency, setRepeatFrequency] = useState('daily');
   const [repeatTime, setRepeatTime] = useState('09:00'); // Default time
 
+  /**
+   * Updates the data of a specific well in the plate.
+   * This function is passed to MergedPlateTable for individual well updates
+   * and used internally for range paste operations.
+   */
+  const handleWellUpdate = useCallback((rowIndex, colIndex, updatedWellData) => {
+    setPlate((prevPlate) => {
+      const newData = [...prevPlate.data]; // Create a shallow copy of rows array
+      newData[rowIndex] = [...newData[rowIndex]]; // Create a shallow copy of the specific row
+      newData[rowIndex][colIndex] = { ...updatedWellData }; // Deep copy the well data
+      return { ...prevPlate, data: newData };
+    });
+  }, []);
+
   // Handle individual input changes for well parameters
-  // This function now directly updates the plate data for the selected well
   const handleWellInputChange = (paramName) => (e) => {
     const value = e.target.value;
     if (selectedWellCoords) {
-      setPlate((prevPlate) => {
-        const newData = [...prevPlate.data];
-        const { rowIndex, colIndex } = selectedWellCoords;
-        // Create a deep copy of the well's data to ensure immutability
-        const updatedWell = { ...newData[rowIndex][colIndex],
-          [paramName]: value
-        };
-        newData[rowIndex][colIndex] = updatedWell;
-        return { ...prevPlate, data: newData };
+      handleWellUpdate(selectedWellCoords.rowIndex, selectedWellCoords.colIndex, {
+        ...plate.data[selectedWellCoords.rowIndex][selectedWellCoords.colIndex],
+        [paramName]: value,
       });
     }
   };
@@ -74,12 +83,18 @@ const RoutineBuilder = () => {
       data: generateMergedPlateData(newLayout), // Regenerate data for new layout
     }));
     setSelectedWellCoords(null); // Deselect well on layout change
+    setLastDraggedRangeCells([]); // Clear last dragged range on layout change
   };
 
-  // Handle well selection for copy/paste and value input
+  // Handle well selection for copy/paste source and value input
   const handleWellSelect = (rowIndex, colIndex) => {
     setSelectedWellCoords({ rowIndex, colIndex });
   };
+
+  // Callback from MergedPlateTable when a drag selection ends
+  const handleRangeSelected = useCallback((cells) => {
+    setLastDraggedRangeCells(cells);
+  }, []);
 
   // Copy content of selected well
   const handleCopyWell = () => {
@@ -94,25 +109,23 @@ const RoutineBuilder = () => {
     alert(`Content of well ${String.fromCharCode(65 + rowIndex)}${colIndex + 1} copied.`);
   };
 
-  // Paste content to selected well
+  // Paste content to the last selected range
   const handlePasteWell = () => {
     if (!copiedWellData) {
       alert('No well content copied yet. Please copy a well first.');
       return;
     }
-    if (!selectedWellCoords) {
-      alert('Please select a well to paste into.');
+    if (lastDraggedRangeCells.length === 0) {
+      alert('No range selected to paste into. Please drag over cells first.');
       return;
     }
 
-    setPlate((prevPlate) => {
-      const newData = [...prevPlate.data];
-      const { rowIndex, colIndex } = selectedWellCoords;
-      // Deep paste all properties
-      newData[rowIndex][colIndex] = { ...copiedWellData };
-      return { ...prevPlate, data: newData };
+    // Iterate through the cells in the last dragged range and apply the copied data
+    lastDraggedRangeCells.forEach(cell => {
+      handleWellUpdate(cell.row, cell.col, { ...copiedWellData });
     });
-    alert(`Content pasted to well ${String.fromCharCode(65 + selectedWellCoords.rowIndex)}${selectedWellCoords.colIndex + 1}.`);
+
+    alert(`Content pasted to ${lastDraggedRangeCells.length} wells.`);
   };
 
   // Save routine to a text file
@@ -121,16 +134,18 @@ const RoutineBuilder = () => {
     plate.data.forEach((row, rowIndex) => {
       row.forEach((well, colIndex) => {
         const wellId = `${String.fromCharCode(65 + rowIndex)}${colIndex + 1}`;
-        // Only include well if it has any non-empty parameter
-        const hasContent = Object.values(well).some(value => value !== '');
-        if (hasContent) {
+        // Only include well if it has any non-default parameter value
+        const hasCustomContent = Object.entries(well).some(([key, value]) => 
+          value !== wellSchema.properties[key].default
+        );
+        if (hasCustomContent) {
           flattenedWells.push({
             well: wellId,
-            Step: well.stepAmount || '',
-            delay: well.delayBetweenStep || '',
-            LT: well.lightTime || '',
-            exposure: well.exposureTime || '',
-            switch: well.switchPlate || '',
+            Step: well.stepAmount, // Use actual values, not || ''
+            delay: well.delayBetweenStep,
+            LT: well.lightTime,
+            exposure: well.exposureTime,
+            switch: well.switchPlate,
           });
         }
       });
@@ -193,13 +208,11 @@ const RoutineBuilder = () => {
       const { rowIndex, colIndex } = selectedWellCoords;
       return plate.data[rowIndex][colIndex];
     }
-    return {
-      stepAmount: '',
-      delayBetweenStep: '',
-      lightTime: '',
-      exposureTime: '',
-      switchPlate: '',
-    };
+    // Return default values from schema if no well is selected
+    return Object.keys(wellSchema.properties).reduce((acc, key) => {
+      acc[key] = wellSchema.properties[key].default;
+      return acc;
+    }, {});
   };
   const currentWellValues = getCurrentWellValues();
 
@@ -397,10 +410,10 @@ const RoutineBuilder = () => {
             <label htmlFor="stepAmount">Step Amount:</label>
             <input
               id="stepAmount"
-              type="text"
+              type="number"
               value={currentWellValues.stepAmount}
               onChange={handleWellInputChange('stepAmount')}
-              placeholder="e.g., 100"
+              placeholder="e.g., 1"
               className="value-input"
               disabled={!selectedWellCoords}
             />
@@ -409,10 +422,10 @@ const RoutineBuilder = () => {
             <label htmlFor="delayBetweenStep">Delay Between Step:</label>
             <input
               id="delayBetweenStep"
-              type="text"
+              type="number"
               value={currentWellValues.delayBetweenStep}
               onChange={handleWellInputChange('delayBetweenStep')}
-              placeholder="e.g., 500ms"
+              placeholder="e.g., 1"
               className="value-input"
               disabled={!selectedWellCoords}
             />
@@ -421,10 +434,10 @@ const RoutineBuilder = () => {
             <label htmlFor="lightTime">Light Time:</label>
             <input
               id="lightTime"
-              type="text"
+              type="number"
               value={currentWellValues.lightTime}
               onChange={handleWellInputChange('lightTime')}
-              placeholder="e.g., 60s"
+              placeholder="e.g., 1"
               className="value-input"
               disabled={!selectedWellCoords}
             />
@@ -433,10 +446,10 @@ const RoutineBuilder = () => {
             <label htmlFor="exposureTime">Exposure Time:</label>
             <input
               id="exposureTime"
-              type="text"
+              type="number"
               value={currentWellValues.exposureTime}
               onChange={handleWellInputChange('exposureTime')}
-              placeholder="e.g., 100ms"
+              placeholder="e.g., 1"
               className="value-input"
               disabled={!selectedWellCoords}
             />
@@ -445,10 +458,10 @@ const RoutineBuilder = () => {
             <label htmlFor="switchPlate">Switch Plate:</label>
             <input
               id="switchPlate"
-              type="text"
+              type="number"
               value={currentWellValues.switchPlate}
               onChange={handleWellInputChange('switchPlate')}
-              placeholder="e.g., Plate 2"
+              placeholder="e.g., 1"
               className="value-input"
               disabled={!selectedWellCoords}
             />
@@ -493,10 +506,10 @@ const RoutineBuilder = () => {
           </button>
           <button
             onClick={handlePasteWell}
-            disabled={!copiedWellData || !selectedWellCoords}
+            disabled={!copiedWellData || lastDraggedRangeCells.length === 0}
             className="control-button copy-paste-button"
           >
-            Paste to Well {selectedWellCoords ? `(${String.fromCharCode(65 + selectedWellCoords.rowIndex)}${selectedWellCoords.colIndex + 1})` : ''}
+            Paste to Selected Range ({lastDraggedRangeCells.length} wells)
           </button>
 
           <button
@@ -522,6 +535,8 @@ const RoutineBuilder = () => {
         plate={plate}
         selectedWellCoords={selectedWellCoords}
         onWellSelect={handleWellSelect}
+        onRangeSelected={handleRangeSelected} // Pass the new callback
+        onWellUpdate={handleWellUpdate} // Pass the well update callback
       />
     </div>
   );

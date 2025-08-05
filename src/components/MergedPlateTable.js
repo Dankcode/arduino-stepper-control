@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 
 const MergedPlateTable = ({
   plate,
@@ -11,7 +11,7 @@ const MergedPlateTable = ({
   // State for drag and drop functionality
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState(null);
-  const [dragEnd, setDragEnd] = useState(null);
+  // selectedRange now stores { startRow, endRow, startCol, endCol, cells: [{ row, col, data }] }
   const [selectedRange, setSelectedRange] = useState(null);
   const tableRef = useRef(null);
 
@@ -46,98 +46,169 @@ const MergedPlateTable = ({
     switchPlate: 'SP',
   };
 
-  // Helper function to check if a cell is in the selected range
-  const isCellInRange = (rowIndex, colIndex) => {
+  /**
+   * Helper function to generate the array of selected cells with their data
+   * based on the current bounding box of the drag selection.
+   * @param {number} currentStartRow - The starting row index of the current selection.
+   * @param {number} currentEndRow - The ending row index of the current selection.
+   * @param {number} currentStartCol - The starting column index of the current selection.
+   * @param {number} currentEndCol - The ending column index of the current selection.
+   * @returns {Array<{row: number, col: number, data: object}>} An array of objects, each representing a selected cell with its data.
+   */
+  const updateSelectedCellsData = useCallback((currentStartRow, currentEndRow, currentStartCol, currentEndCol) => {
+    const cells = [];
+    // Normalize start and end to always be min and max for correct iteration
+    const minRow = Math.min(currentStartRow, currentEndRow);
+    const maxRow = Math.max(currentStartRow, currentEndRow);
+    const minCol = Math.min(currentStartCol, currentEndCol);
+    const maxCol = Math.max(currentStartCol, currentEndCol);
+
+    for (let r = minRow; r <= maxRow; r++) {
+      for (let c = minCol; c <= maxCol; c++) {
+        const wellData = data[r]?.[c]; // Get the well data for the current coordinate
+        if (wellData) {
+          cells.push({ row: r, col: c, data: wellData });
+        } else {
+          cells.push({ row: r, col: c, data: {} }); // Push empty data if well is undefined
+        }
+      }
+    }
+    return cells;
+  }, [data]); // Dependency on 'data' to ensure it uses the latest plate data
+
+  /**
+   * Helper function to check if a cell is in the selected range (for visual highlighting).
+   * This only checks the bounding box, not the `cells` array within `selectedRange`.
+   * @param {number} rowIndex - The row index of the cell.
+   * @param {number} colIndex - The column index of the cell.
+   * @returns {boolean} - True if the cell is within the selected range's bounding box, false otherwise.
+   */
+  const isCellInRange = useCallback((rowIndex, colIndex) => {
     if (!selectedRange) return false;
-    const { startRow, endRow, startCol, endCol } = selectedRange;
+    // Normalize start and end to always be min and max for correct range checking
+    const startRow = Math.min(selectedRange.startRow, selectedRange.endRow);
+    const endRow = Math.max(selectedRange.startRow, selectedRange.endRow);
+    const startCol = Math.min(selectedRange.startCol, selectedRange.endCol);
+    const endCol = Math.max(selectedRange.startCol, selectedRange.endCol);
+
     return rowIndex >= startRow && rowIndex <= endRow && 
            colIndex >= startCol && colIndex <= endCol;
-  };
+  }, [selectedRange]);
 
-  // Handle mouse down on a cell (start selection/drag)
+  /**
+   * Handles the mouse down event on a cell to start a drag selection.
+   * Initializes the drag start point and the selected range with the clicked cell's data.
+   * @param {number} rowIndex - The row index of the clicked cell.
+   * @param {number} colIndex - The column index of the clicked cell.
+   * @param {React.MouseEvent} event - The mouse event.
+   */
   const handleMouseDown = useCallback((rowIndex, colIndex, event) => {
-    event.preventDefault();
+    event.preventDefault(); // Prevent default browser drag behavior
     setDragStart({ row: rowIndex, col: colIndex });
-    setDragEnd({ row: rowIndex, col: colIndex });
     setIsDragging(true);
     
-    // Update selected range
+    // Initialize selectedRange with the first cell's data and bounding box
+    const initialCells = updateSelectedCellsData(rowIndex, rowIndex, colIndex, colIndex);
     setSelectedRange({
       startRow: rowIndex,
       endRow: rowIndex,
       startCol: colIndex,
-      endCol: colIndex
+      endCol: colIndex,
+      cells: initialCells // Store the data of the initial cell
     });
     
-    // Also trigger the original well select
+    // Also trigger the original well select callback
     if (onWellSelect) {
       onWellSelect(rowIndex, colIndex);
     }
-  }, [onWellSelect]);
+  }, [onWellSelect, updateSelectedCellsData]);
 
-  // Handle mouse enter on a cell (expand selection during drag)
+  /**
+   * Handles the mouse enter event on a cell during a drag.
+   * Expands the selection range and updates the data of all cells within the new range.
+   * @param {number} rowIndex - The row index of the cell being entered.
+   * @param {number} colIndex - The column index of the cell being entered.
+   */
   const handleMouseEnter = useCallback((rowIndex, colIndex) => {
     if (!isDragging || !dragStart) return;
     
-    setDragEnd({ row: rowIndex, col: colIndex });
-    
-    // Update selected range
-    const startRow = Math.min(dragStart.row, rowIndex);
-    const endRow = Math.max(dragStart.row, rowIndex);
-    const startCol = Math.min(dragStart.col, colIndex);
-    const endCol = Math.max(dragStart.col, colIndex);
-    
-    setSelectedRange({ startRow, endRow, startCol, endCol });
-  }, [isDragging, dragStart]);
+    // Calculate the new bounding box based on dragStart and current cell
+    const newStartRow = dragStart.row;
+    const newEndRow = rowIndex;
+    const newStartCol = dragStart.col;
+    const newEndCol = colIndex;
 
-  // Handle mouse up (end selection/drag)
-  const handleMouseUp = useCallback(() => {
-    setIsDragging(false);
-  }, []);
+    // Update selectedRange with the new bounding box and re-calculate cells data
+    setSelectedRange(prevRange => {
+        const updatedCells = updateSelectedCellsData(newStartRow, newEndRow, newStartCol, newEndCol);
+        return {
+            startRow: newStartRow,
+            endRow: newEndRow,
+            startCol: newStartCol,
+            endCol: newEndCol,
+            cells: updatedCells // Update the data of all cells in the current range
+        };
+    });
+  }, [isDragging, dragStart, updateSelectedCellsData]);
 
-  // Handle paste operation
+  /**
+   * Handles the paste operation.
+   * Copies data from the `selectedWellCoords` (the single well clicked for copy)
+   * to all wells within the `selectedRange`.
+   */
   const handlePaste = useCallback(() => {
     if (!selectedRange || !onWellUpdate || !selectedWellCoords) return;
 
-    // Get the data of the single selected well
-    const selectedWellData = data[selectedWellCoords.rowIndex][selectedWellCoords.colIndex];
+    // Get the data of the single selected well (the source for pasting)
+    const sourceWellData = data[selectedWellCoords.rowIndex][selectedWellCoords.colIndex];
 
-    // Find all highlighted coordinates (the selected range)
-    for (let targetRow = selectedRange.startRow; targetRow <= selectedRange.endRow; targetRow++) {
-      for (let targetCol = selectedRange.startCol; targetCol <= selectedRange.endCol; targetCol++) {
-        // Replace the data of each highlighted cell with the selected well's data
-        // Use a deep copy to avoid modifying the original object
-        onWellUpdate(targetRow, targetCol, { ...selectedWellData });
-      }
-    }
+    // Iterate through the cells in the selectedRange (which now contains all cells' coordinates)
+    // and apply the sourceWellData to them using the onWellUpdate callback.
+    selectedRange.cells.forEach(cell => {
+      // Use a deep copy to avoid modifying the original object
+      onWellUpdate(cell.row, cell.col, { ...sourceWellData });
+    });
 
   }, [selectedRange, selectedWellCoords, data, onWellUpdate]);
 
-  // Handle copy/paste operations (Ctrl+C/Ctrl+V)
-  const handleKeyDown = useCallback((event) => {
-    if (event.ctrlKey && event.key === 'c' && selectedWellCoords) {
-        // No longer need to copy a range, as we are only copying the selected well
-        // We can just rely on selectedWellCoords to determine what to paste.
-        // The `handlePaste` function is now responsible for getting the data.
-    } else if (event.ctrlKey && event.key === 'v' && selectedRange && selectedWellCoords) {
-      // Paste operation
-      handlePaste();
-    }
-  }, [selectedRange, selectedWellCoords, handlePaste]);
+  /**
+   * Handles the mouse up event, ending the drag selection.
+   * Logs the selected coordinates with their data and then triggers the paste operation.
+   */
+  const handleMouseUp = useCallback(() => {
+    setIsDragging(false);
+    setDragStart(null); // Reset drag start
 
-  // Add global mouse up listener and keyboard events
-  React.useEffect(() => {
+    // Log the array of selected coordinates and their data to the console
+    if (selectedRange && selectedRange.cells) {
+        const cellsToLog = selectedRange.cells.map(cell => {
+            const formattedWellData = {};
+            // Map full parameter names to their abbreviated labels for the log output
+            Object.entries(cell.data).forEach(([paramName, value]) => {
+                formattedWellData[paramLabels[paramName] || paramName] = value;
+            });
+            return { row: cell.row, col: cell.col, data: formattedWellData };
+        });
+        console.log("Selected Coordinates and Data after drag end:", cellsToLog);
+    } else {
+        console.log("No cells selected or selectedRange is null.");
+    }
+
+    handlePaste(); // Call the paste function after logging
+  }, [selectedRange, handlePaste, paramLabels]); // Dependencies for useCallback
+
+  // Effect hook to add and clean up global mouse up listener
+  useEffect(() => {
     document.addEventListener('mouseup', handleMouseUp);
-    document.addEventListener('keydown', handleKeyDown);
     
     return () => {
       document.removeEventListener('mouseup', handleMouseUp);
-      document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [handleMouseUp, handleKeyDown]);
+  }, [handleMouseUp]); // Re-run if handleMouseUp changes
 
   return (
     <div className="merged-plate-table-container">
+      {/* Inline styles for the component */}
       <style>{`
         .merged-plate-table-container {
           flex: 1;
@@ -266,26 +337,7 @@ const MergedPlateTable = ({
           text-align: right;
           flex-grow: 1;
         }
-
-        /* Instructions */
-        .instructions {
-          position: absolute;
-          top: 10px;
-          right: 10px;
-          background: rgba(0, 0, 0, 0.8);
-          color: white;
-          padding: 8px 12px;
-          border-radius: 4px;
-          font-size: 0.75rem;
-          z-index: 1000;
-          pointer-events: none;
-        }
       `}</style>
-      
-      <div className="instructions">
-        Drag to select • Ctrl+C to copy • Ctrl+V to paste
-      </div>
-      
       <div className="merged-plate-table-wrapper">
         <table 
           className={`merged-plate-table ${isDragging ? 'dragging' : ''}`}
