@@ -1,89 +1,72 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import MergedPlateTable from './MergedPlateTable'; // Import the new merged plate component
-import { wellSchema } from './plateSchema'; // Import the schema for default values
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import MergedPlateTable from './MergedPlateTable';
+import { wellSchema } from './plateSchema';
 
-// Helper function to generate an empty plate data structure for the merged table
-const generateMergedPlateData = (baseLayout) => {
-  let baseRows, baseCols;
-  if (baseLayout === '96-well') {
-    baseRows = 8;
-    baseCols = 12;
-  } else { // 48-well
-    baseRows = 6;
-    baseCols = 8;
+// Helper function to get row and column counts for a given layout.
+const getLayoutDimensions = (layout) => {
+  if (layout === '96-well') {
+    return { rows: 8, cols: 12 };
   }
+  if (layout === '48-well') {
+    return { rows: 6, cols: 8 };
+  }
+  return { rows: 0, cols: 0 }; // 'none' layout has 0 dimensions
+};
 
-  const totalRows = baseRows * 2; // 2x2 quadrant
-  const totalCols = baseCols * 2; // 2x2 quadrant
-
+// Creates a data array for a given layout, with default values from the schema.
+const createPlateData = (layout) => {
+  const { rows, cols } = getLayoutDimensions(layout);
   // Initialize wells with an object containing all parameter keys with default values from schema
   const defaultWellData = Object.keys(wellSchema.properties).reduce((acc, key) => {
     acc[key] = wellSchema.properties[key].default;
     return acc;
   }, {});
 
-  return Array(totalRows)
-    .fill(null)
-    .map(() =>
-      Array(totalCols)
-        .fill(null)
-        .map(() => ({ ...defaultWellData })) // Use spread to create a new object for each well
-    );
+  return Array.from({ length: rows }, () =>
+    Array.from({ length: cols }, () => ({ ...defaultWellData }))
+  );
+};
+
+// Helper function to create a default filename with a timestamp
+const createDefaultFilename = () => {
+  const now = new Date();
+  const date = now.toISOString().split('T')[0];
+  const time = now.toTimeString().split(' ')[0].replace(/:/g, '-');
+  return `${date}-${time}-wellplates-wellplates2`;
 };
 
 const RoutineBuilder = () => {
-  // State for the single merged plate
-  const [plate, setPlate] = useState({
-    id: 1,
-    baseLayout: '96-well',
-    data: generateMergedPlateData('96-well'),
+  // State to manage the layout for each quadrant, defaulting to one active plate
+  const [quadrantLayouts, setQuadrantLayouts] = useState({
+    topLeft: '96-well',
+    topRight: 'none',
+    bottomLeft: 'none',
+    bottomRight: 'none',
+  });
+
+  // State to hold the actual data for each quadrant - this is the single source of truth
+  const [quadrantData, setQuadrantData] = useState({
+    topLeft: createPlateData('96-well'),
+    topRight: null,
+    bottomLeft: null,
+    bottomRight: null,
   });
 
   // State for the coordinates of the currently selected well (for single well input/copy source)
   const [selectedWellCoords, setSelectedWellCoords] = useState(null);
-  // State for the data copied from a well
-  const [copiedWellData, setCopiedWellData] = useState(null);
-  // State for the cells in the last dragged range (for paste target)
-  const [lastDraggedRangeCells, setLastDraggedRangeCells] = useState([]);
 
   // States for routine repetition
   const [repeatFrequency, setRepeatFrequency] = useState('daily');
   const [repeatTime, setRepeatTime] = useState('09:00'); // Default time
+  // State for the custom filename
+  const [filename, setFilename] = useState(createDefaultFilename());
 
-  /**
-   * Updates the data of a specific well in the plate.
-   * This function is passed to MergedPlateTable for individual well updates
-   * and used internally for range paste operations.
-   */
-  const handleWellUpdate = useCallback((rowIndex, colIndex, updatedWellData) => {
-    setPlate((prevPlate) => {
-      const newData = [...prevPlate.data]; // Create a shallow copy of rows array
-      newData[rowIndex] = [...newData[rowIndex]]; // Create a shallow copy of the specific row
-      newData[rowIndex][colIndex] = { ...updatedWellData }; // Deep copy the well data
-      return { ...prevPlate, data: newData };
-    });
-  }, []);
-
-  // Handle individual input changes for well parameters
-  const handleWellInputChange = (paramName) => (e) => {
-    const value = e.target.value;
-    if (selectedWellCoords) {
-      handleWellUpdate(selectedWellCoords.rowIndex, selectedWellCoords.colIndex, {
-        ...plate.data[selectedWellCoords.rowIndex][selectedWellCoords.colIndex],
-        [paramName]: value,
-      });
-    }
-  };
-
-  // Base plate layout customization (96-well vs 48-well)
-  const handleBaseLayoutChange = (newLayout) => {
-    setPlate((prevPlate) => ({
-      ...prevPlate,
-      baseLayout: newLayout,
-      data: generateMergedPlateData(newLayout), // Regenerate data for new layout
-    }));
-    setSelectedWellCoords(null); // Deselect well on layout change
-    setLastDraggedRangeCells([]); // Clear last dragged range on layout change
+  // A memoized map of quadrant properties for easy access
+  const quadrantMap = {
+    topLeft: { startRow: 0, startCol: 0 },
+    topRight: { startRow: 0, startCol: 12 },
+    bottomLeft: { startRow: 8, startCol: 0 },
+    bottomRight: { startRow: 8, startCol: 12 },
   };
 
   // Handle well selection for copy/paste source and value input
@@ -91,81 +74,127 @@ const RoutineBuilder = () => {
     setSelectedWellCoords({ rowIndex, colIndex });
   };
 
-  // Callback from MergedPlateTable when a drag selection ends
-  const handleRangeSelected = useCallback((cells) => {
-    setLastDraggedRangeCells(cells);
+  // Callback for when a quadrant's layout is changed
+  const handleLayoutChange = useCallback((quadrant, layout) => {
+    setQuadrantLayouts(prev => ({ ...prev, [quadrant]: layout }));
+    if (layout === 'none') {
+      setQuadrantData(prev => ({ ...prev, [quadrant]: null }));
+    } else {
+      setQuadrantData(prev => ({ ...prev, [quadrant]: createPlateData(layout) }));
+    }
   }, []);
 
-  // Copy content of selected well
-  const handleCopyWell = () => {
-    if (!selectedWellCoords) {
-      alert('Please select a well to copy.');
-      return;
-    }
-    const { rowIndex, colIndex } = selectedWellCoords;
-    const wellContent = plate.data[rowIndex][colIndex];
-    // Deep copy all properties of the well
-    setCopiedWellData({ ...wellContent });
-    alert(`Content of well ${String.fromCharCode(65 + rowIndex)}${colIndex + 1} copied.`);
-  };
-
-  // Paste content to the last selected range
-  const handlePasteWell = () => {
-    if (!copiedWellData) {
-      alert('No well content copied yet. Please copy a well first.');
-      return;
-    }
-    if (lastDraggedRangeCells.length === 0) {
-      alert('No range selected to paste into. Please drag over cells first.');
-      return;
-    }
-
-    // Iterate through the cells in the last dragged range and apply the copied data
-    lastDraggedRangeCells.forEach(cell => {
-      handleWellUpdate(cell.row, cell.col, { ...copiedWellData });
-    });
-
-    alert(`Content pasted to ${lastDraggedRangeCells.length} wells.`);
-  };
-
-  // Save routine to a text file
-  const handleSaveRoutine = () => {
-    const flattenedWells = [];
-    plate.data.forEach((row, rowIndex) => {
-      row.forEach((well, colIndex) => {
-        const wellId = `${String.fromCharCode(65 + rowIndex)}${colIndex + 1}`;
-        // Only include well if it has any non-default parameter value
-        const hasCustomContent = Object.entries(well).some(([key, value]) => 
-          value !== wellSchema.properties[key].default
-        );
-        if (hasCustomContent) {
-          flattenedWells.push({
-            well: wellId,
-            Step: well.stepAmount, // Use actual values, not || ''
-            delay: well.delayBetweenStep,
-            LT: well.lightTime,
-            exposure: well.exposureTime,
-            switch: well.switchPlate,
+  // useMemo hook to calculate the total runtime whenever quadrantData changes.
+  // This is the part that automatically updates the display when you edit a well.
+  const totalRuntime = useMemo(() => {
+    let total = 0;
+    
+    Object.values(quadrantData).forEach(quadrant => {
+      if (quadrant) {
+        quadrant.forEach(row => {
+          row.forEach(well => {
+            if (well) {
+              total += parseInt(well.stepAmount || '0', 10);
+              total += parseInt(well.delayBetweenStep || '0', 10);
+              total += parseInt(well.lightTime || '0', 10);
+              total += parseInt(well.exposureTime || '0', 10);
+            }
           });
-        }
-      });
+        });
+      }
     });
+    
+    return total;
+  }, [quadrantData]);
 
-    const routineData = {
-      plateType: plate.baseLayout,
-      routineSchedule: {
-        repeatFrequency: repeatFrequency,
-        repeatTime: repeatTime,
+  // Function to convert seconds to days, hours, minutes, and remaining seconds
+  const formatTime = (totalSeconds) => {
+    const days = Math.floor(totalSeconds / (3600 * 24));
+    const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    let parts = [];
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    parts.push(`${seconds}s`);
+
+    return parts.join(' ');
+  };
+
+  // Handle filename change and sanitize the input
+  const handleFilenameChange = (e) => {
+    // Allows letters, numbers, hyphens, underscores, and periods
+    const sanitizedName = e.target.value.replace(/[^a-zA-Z0-9-_.]/g, '');
+    setFilename(sanitizedName);
+  };
+
+  // Save routine to a text file with the new structured format
+  const handleSaveRoutine = () => {
+    const routineData = [
+      {
+        routineSchedule: {
+          repeatFrequency: repeatFrequency,
+          repeatTime: repeatTime,
+        },
       },
-      wells: flattenedWells,
+    ];
+    
+    // Helper function to process a quadrant's data
+    const processQuadrant = (quadrantName, quadrantDataArray, plateType) => {
+      if (plateType === 'none' || !quadrantDataArray) {
+        return [];
+      }
+      
+      const wells = [];
+      const { rows, cols } = getLayoutDimensions(plateType);
+      
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const well = quadrantDataArray[r]?.[c];
+          
+          if (well) {
+            const wellId = `${String.fromCharCode(65 + r)}${c + 1}`;
+            wells.push({
+              well: wellId,
+              stepAmount: well.stepAmount,
+              delayBetweenStep: well.delayBetweenStep,
+              lightTime: well.lightTime,
+              exposureTime: well.exposureTime,
+              switchPlate: well.switchPlate,
+            });
+          }
+        }
+      }
+      return wells;
     };
+    
+    // Process each quadrant and add to the plates array in the specified order
+    const quadrants = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+    let plateNumber = 1;
+    quadrants.forEach(quadrant => {
+      const layout = quadrantLayouts[quadrant];
+      const quadrantDataArray = quadrantData[quadrant];
+
+      const quadrantProcessedData = processQuadrant(
+        quadrant,
+        quadrantDataArray,
+        layout
+      );
+      
+      const plateObject = {};
+      plateObject[`${plateNumber}`] = quadrantProcessedData;
+      routineData.push(plateObject);
+      plateNumber++;
+    });
 
     const routineString = JSON.stringify(routineData, null, 2);
     const blob = new Blob([routineString], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'routine.txt';
+    link.download = filename + '.txt';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -175,7 +204,6 @@ const RoutineBuilder = () => {
   // Upload routine to Python backend
   const handleUploadRoutine = async (file) => {
     if (!file) {
-      alert('Please select a file to upload.');
       return;
     }
 
@@ -189,32 +217,14 @@ const RoutineBuilder = () => {
       });
 
       if (response.ok) {
-        alert('Routine uploaded successfully!');
         const result = await response.json();
-        console.log('Backend response:', result);
       } else {
         const errorText = await response.text();
-        alert(`Failed to upload routine: ${response.status} ${response.statusText} - ${errorText}`);
       }
     } catch (error) {
       console.error('Error uploading routine:', error);
-      alert('Network error. Could not connect to the backend. Ensure your Python backend is running on localhost:5000.');
     }
   };
-
-  // Get the current well's values for display in input fields
-  const getCurrentWellValues = () => {
-    if (selectedWellCoords) {
-      const { rowIndex, colIndex } = selectedWellCoords;
-      return plate.data[rowIndex][colIndex];
-    }
-    // Return default values from schema if no well is selected
-    return Object.keys(wellSchema.properties).reduce((acc, key) => {
-      acc[key] = wellSchema.properties[key].default;
-      return acc;
-    }, {});
-  };
-  const currentWellValues = getCurrentWellValues();
 
   return (
     <div className="routine-builder-container">
@@ -222,82 +232,86 @@ const RoutineBuilder = () => {
         body {
           margin: 0;
           font-family: 'Inter', sans-serif;
-          overflow: hidden; /* Prevent body scroll */
+          overflow: hidden;
         }
         .routine-builder-container {
           display: flex;
           height: 100vh;
           background-color: #f3f4f6;
           font-family: 'Inter', sans-serif;
-          padding: 1.5rem; /* Added padding for overall margins */
-          box-sizing: border-box; /* Include padding in element's total width and height */
+          padding: 1.5rem;
+          box-sizing: border-box;
         }
 
         .control-panel {
           background-color: #ffffff;
           box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
-          padding: 1.5rem;
+          padding: 0.75rem;
           display: flex;
           flex-direction: column;
-          border-radius: 0.75rem; /* Rounded all corners */
-          overflow-y: auto; /* Allow control panel to scroll if content is long */
-          flex-shrink: 0; /* Prevent panel from shrinking */
-          margin-right: 1.5rem; /* Margin between control panel and table */
+          border-radius: 0.75rem;
+          overflow-y: auto;
+          flex-shrink: 0;
+          margin-right: 1.5rem;
+          width: 300px;
+        }
+
+        .plate-wrapper {
+          flex-grow: 1;
+          overflow: auto;
         }
 
         .panel-section {
           background-color: #f9fafb;
           border: 1px solid #e5e7eb;
           border-radius: 0.5rem;
-          padding: 1rem;
+          padding: 0.75rem;
           box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.05);
+          margin-bottom: 1rem;
         }
 
         .panel-section h2 {
-          font-size: 1.25rem;
+          font-size: 1.1rem;
           font-weight: 700;
           color: #1f2937;
-          margin-bottom: 1rem;
+          margin-bottom: 0.75rem;
           text-align: center;
         }
-
-        .input-section {
-          display: flex;
-          flex-direction: column;
-          gap: 0.75rem;
+        
+        .filename-input {
+          padding: 0.4rem;
+          border: 1px solid #d1d5db;
+          border-radius: 0.3rem;
+          font-size: 0.85rem;
+          flex-grow: 1;
+          box-sizing: border-box;
+          width: 50%;
         }
 
         .input-group {
           display: flex;
           align-items: center;
           gap: 0.5rem;
+          width: 100%;
+          justify-content: space-between;
         }
-
+        
         .input-group label {
           font-size: 0.9rem;
           color: #374151;
           flex-shrink: 0;
-          width: 100px; /* Fixed width for labels */
-          text-align: right;
-        }
-
-        .value-input {
-          padding: 0.5rem; /* Smaller padding */
-          border: 1px solid #d1d5db;
-          border-radius: 0.3rem; /* Slightly smaller border radius */
-          font-size: 0.9rem; /* Smaller font size */
-          flex-grow: 1; /* Allow input to take remaining space */
-          box-sizing: border-box;
+          width: 80px;
+          text-align: left;
         }
 
         .control-buttons-group {
           display: flex;
           flex-direction: column;
-          gap: 0.75rem;
+          gap: 0.5rem;
         }
 
         .control-button {
-          padding: 0.75rem 1rem;
+          padding: 0.6rem 0.8rem;
           color: white;
           border-radius: 0.5rem;
           font-weight: 600;
@@ -335,11 +349,14 @@ const RoutineBuilder = () => {
           background-color: #7c3aed;
         }
 
-        .copy-paste-button {
-          background-color: #f59e0b;
-        }
-        .copy-paste-button:hover:not(:disabled) {
-          background-color: #d97706;
+        .copy-paste-context {
+          font-size: 0.8rem;
+          color: #6b7280;
+          text-align: center;
+          margin: 0.25rem 0;
+          padding: 0.4rem;
+          background-color: #f9fafb;
+          border-radius: 0.5rem;
         }
 
         .upload-input {
@@ -370,7 +387,7 @@ const RoutineBuilder = () => {
         .repeat-schedule-group {
             display: flex;
             flex-direction: column;
-            gap: 0.75rem;
+            gap: 0.5rem;
             align-items: center;
         }
 
@@ -381,92 +398,23 @@ const RoutineBuilder = () => {
 
         .repeat-schedule-group select,
         .repeat-schedule-group input[type="time"] {
-            padding: 0.5rem;
+            padding: 0.4rem;
             border: 1px solid #d1d5db;
             border-radius: 0.3rem;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             flex-grow: 1;
             box-sizing: border-box;
         }
+        
+        .runtime-display {
+          font-size: 0.9rem;
+          font-weight: 600;
+          color: #1f2937;
+          text-align: center;
+          margin-top: 0.75rem;
+        }
       `}</style>
       <div className="control-panel">
-        {/* Layout Selection */}
-        <div className="panel-section layout-selector-group">
-            <h2>Plate Layout</h2>
-            <select
-                value={plate.baseLayout}
-                onChange={(e) => handleBaseLayoutChange(e.target.value)}
-                className="layout-selector"
-            >
-                <option value="96-well">96-well Base (16x24 Grid)</option>
-                <option value="48-well">48-well Base (12x16 Grid)</option>
-            </select>
-        </div>
-
-        {/* Value Input Section */}
-        <div className="panel-section input-section">
-          <h2>Well Parameters</h2>
-          <div className="input-group">
-            <label htmlFor="stepAmount">Step Amount:</label>
-            <input
-              id="stepAmount"
-              type="number"
-              value={currentWellValues.stepAmount}
-              onChange={handleWellInputChange('stepAmount')}
-              placeholder="e.g., 1"
-              className="value-input"
-              disabled={!selectedWellCoords}
-            />
-          </div>
-          <div className="input-group">
-            <label htmlFor="delayBetweenStep">Delay Between Step:</label>
-            <input
-              id="delayBetweenStep"
-              type="number"
-              value={currentWellValues.delayBetweenStep}
-              onChange={handleWellInputChange('delayBetweenStep')}
-              placeholder="e.g., 1"
-              className="value-input"
-              disabled={!selectedWellCoords}
-            />
-          </div>
-          <div className="input-group">
-            <label htmlFor="lightTime">Light Time:</label>
-            <input
-              id="lightTime"
-              type="number"
-              value={currentWellValues.lightTime}
-              onChange={handleWellInputChange('lightTime')}
-              placeholder="e.g., 1"
-              className="value-input"
-              disabled={!selectedWellCoords}
-            />
-          </div>
-          <div className="input-group">
-            <label htmlFor="exposureTime">Exposure Time:</label>
-            <input
-              id="exposureTime"
-              type="number"
-              value={currentWellValues.exposureTime}
-              onChange={handleWellInputChange('exposureTime')}
-              placeholder="e.g., 1"
-              className="value-input"
-              disabled={!selectedWellCoords}
-            />
-          </div>
-          <div className="input-group">
-            <label htmlFor="switchPlate">Switch Plate:</label>
-            <input
-              id="switchPlate"
-              type="number"
-              value={currentWellValues.switchPlate}
-              onChange={handleWellInputChange('switchPlate')}
-              placeholder="e.g., 1"
-              className="value-input"
-              disabled={!selectedWellCoords}
-            />
-          </div>
-        </div>
 
         {/* Routine Repetition Schedule */}
         <div className="panel-section repeat-schedule-group">
@@ -497,21 +445,20 @@ const RoutineBuilder = () => {
         {/* Global Controls */}
         <div className="panel-section control-buttons-group">
           <h2>Routine Actions</h2>
-          <button
-            onClick={handleCopyWell}
-            disabled={!selectedWellCoords}
-            className="control-button copy-paste-button"
-          >
-            Copy Well {selectedWellCoords ? `(${String.fromCharCode(65 + selectedWellCoords.rowIndex)}${selectedWellCoords.colIndex + 1})` : ''}
-          </button>
-          <button
-            onClick={handlePasteWell}
-            disabled={!copiedWellData || lastDraggedRangeCells.length === 0}
-            className="control-button copy-paste-button"
-          >
-            Paste to Selected Range ({lastDraggedRangeCells.length} wells)
-          </button>
-
+          <div className="copy-paste-context">
+            Use Ctrl + C to copy and Ctrl + V to paste.
+          </div>
+          <div className="input-group">
+            <label htmlFor="filename">File Name:</label>
+            <input
+              type="text"
+              id="filename"
+              value={filename}
+              onChange={handleFilenameChange}
+              className="filename-input"
+              placeholder="e.g. MyRoutine_01"
+            />
+          </div>
           <button
             onClick={handleSaveRoutine}
             className="control-button save-button"
@@ -528,16 +475,27 @@ const RoutineBuilder = () => {
             />
           </label>
         </div>
+        
+        {/* Total Runtime Display */}
+        <div className="panel-section">
+          <h2>Total Runtime</h2>
+          <div className="runtime-display">
+            {formatTime(totalRuntime)}
+          </div>
+        </div>
       </div>
-
+      
       {/* Merged Plate Table Display Area */}
-      <MergedPlateTable
-        plate={plate}
-        selectedWellCoords={selectedWellCoords}
-        onWellSelect={handleWellSelect}
-        onRangeSelected={handleRangeSelected} // Pass the new callback
-        onWellUpdate={handleWellUpdate} // Pass the well update callback
-      />
+      <div className="plate-wrapper">
+        <MergedPlateTable
+          quadrantLayouts={quadrantLayouts}
+          quadrantData={quadrantData}
+          setQuadrantData={setQuadrantData}
+          selectedWellCoords={selectedWellCoords}
+          onWellSelect={handleWellSelect}
+          onLayoutChange={handleLayoutChange}
+        />
+      </div>
     </div>
   );
 };

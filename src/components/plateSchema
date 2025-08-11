@@ -1,12 +1,11 @@
 // plateSchema.js
 export const wellSchema = {
+  well: 'string',
   type: "object",
   properties: {
     stepAmount: { type: "string", default: "1" },
     delayBetweenStep: { type: "string", default: "1" },
     lightTime: { type: "string", default: "1" },
     exposureTime: { type: "string", default: "1" },
-    switchPlate: { type: "string", default: "1" },
   },
-  required: ["stepAmount", "delayBetweenStep", "lightTime", "exposureTime", "switchPlate"],
 };
