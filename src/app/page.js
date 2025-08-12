@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import ManualControl from '../components/ManualControl'; // Assuming these components exist
 import RoutineBuilder from '../components/RoutineBuilder'; // Assuming these components exist
+import PiRoutineManager from '../components/PiRoutineManager'; // Import the new component
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('routine');
@@ -375,12 +376,21 @@ export default function Home() {
             >
               Manual Control
             </button>
+            <button
+              onClick={() => setActiveTab('pi')}
+              className={`tab-button ${
+                activeTab === 'pi' ? 'active' : 'inactive'
+              }`}
+            >
+              Pi Routines
+            </button>
           </nav>
         </div>
       </div>
 
-      {/* The content of ManualControl and RoutineBuilder will inherit styles like .card, .title, etc. */}
-      {activeTab === 'routine' ? <RoutineBuilder /> : <ManualControl />}
+      {activeTab === 'routine' && <RoutineBuilder />}
+      {activeTab === 'manual' && <ManualControl />}
+      {activeTab === 'pi' && <PiRoutineManager />}
     </div>
   );
 }
