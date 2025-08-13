@@ -55,19 +55,8 @@ const RoutineBuilder = () => {
   // State for the coordinates of the currently selected well (for single well input/copy source)
   const [selectedWellCoords, setSelectedWellCoords] = useState(null);
 
-  // States for routine repetition
-  const [repeatFrequency, setRepeatFrequency] = useState('daily');
-  const [repeatTime, setRepeatTime] = useState('09:00'); // Default time
   // State for the custom filename
   const [filename, setFilename] = useState(createDefaultFilename());
-
-  // A memoized map of quadrant properties for easy access
-  const quadrantMap = {
-    topLeft: { startRow: 0, startCol: 0 },
-    topRight: { startRow: 0, startCol: 12 },
-    bottomLeft: { startRow: 8, startCol: 0 },
-    bottomRight: { startRow: 8, startCol: 12 },
-  };
 
   // Handle well selection for copy/paste source and value input
   const handleWellSelect = (rowIndex, colIndex) => {
@@ -132,11 +121,11 @@ const RoutineBuilder = () => {
 
   // Save routine to a text file with the new structured format
   const handleSaveRoutine = () => {
+    // Start with an object that contains the total runtime in a summary section
     const routineData = [
       {
-        routineSchedule: {
-          repeatFrequency: repeatFrequency,
-          repeatTime: repeatTime,
+        routineSummary: {
+          totalRuntime: formatTime(totalRuntime),
         },
       },
     ];
@@ -383,28 +372,6 @@ const RoutineBuilder = () => {
             width: 100%;
             text-align: center;
         }
-
-        .repeat-schedule-group {
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-            align-items: center;
-        }
-
-        .repeat-schedule-group .input-group {
-            width: 100%;
-            justify-content: space-between;
-        }
-
-        .repeat-schedule-group select,
-        .repeat-schedule-group input[type="time"] {
-            padding: 0.4rem;
-            border: 1px solid #d1d5db;
-            border-radius: 0.3rem;
-            font-size: 0.85rem;
-            flex-grow: 1;
-            box-sizing: border-box;
-        }
         
         .runtime-display {
           font-size: 0.9rem;
@@ -415,33 +382,6 @@ const RoutineBuilder = () => {
         }
       `}</style>
       <div className="control-panel">
-
-        {/* Routine Repetition Schedule */}
-        <div className="panel-section repeat-schedule-group">
-            <h2>Routine Schedule</h2>
-            <div className="input-group">
-                <label htmlFor="repeatFrequency">Repeat every:</label>
-                <select
-                    id="repeatFrequency"
-                    value={repeatFrequency}
-                    onChange={(e) => setRepeatFrequency(e.target.value)}
-                >
-                    <option value="daily">Daily</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="monthly">Monthly</option>
-                </select>
-            </div>
-            <div className="input-group">
-                <label htmlFor="repeatTime">At time:</label>
-                <input
-                    id="repeatTime"
-                    type="time"
-                    value={repeatTime}
-                    onChange={(e) => setRepeatTime(e.target.value)}
-                />
-            </div>
-        </div>
-
         {/* Global Controls */}
         <div className="panel-section control-buttons-group">
           <h2>Routine Actions</h2>
