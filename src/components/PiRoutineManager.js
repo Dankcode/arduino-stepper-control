@@ -1,313 +1,460 @@
-// components/PiRoutineManager.js
 'use client';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
-// This component handles the connection and display for the Raspberry Pi routines
-const PiRoutineManager = () => {
-  const [connectionStatus, setConnectionStatus] = useState('pending');
-  const [allRoutines, setAllRoutines] = useState([]);
-  const [activeRoutines, setActiveRoutines] = useState([]);
+// This component is now a presentational component, receiving all data and functions as props.
+const PiRoutineManager = ({ 
+  allRoutines, 
+  activeRoutines, 
+  isLoading, 
+  onLocalUpdateActiveRoutine,
+  onSaveSchedule,
+  onRename,
+  onDeleteRoutine,
+  onMoveToActive,
+  onMoveToInactive
+}) => {
   const [selectedRoutine, setSelectedRoutine] = useState(null);
   const [selectedActiveRoutine, setSelectedActiveRoutine] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
 
-  // Use the IP address of your Raspberry Pi instead of localhost
-  const PI_BACKEND_URL = 'http://192.168.1.3:5000';
-
-  // Helper function to parse '6m 24s' into seconds
-  const parseRuntimeToSeconds = (runtimeStr) => {
-    if (!runtimeStr) return 0;
-    const parts = runtimeStr.match(/(\d+)m\s*(\d+)s/);
-    if (!parts) return 0;
-    const minutes = parseInt(parts[1], 10) || 0;
-    const seconds = parseInt(parts[2], 10) || 0;
-    return minutes * 60 + seconds;
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [newRoutineName, setNewRoutineName] = useState('');
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [fileToDelete, setFileToDelete] = useState(null);
+  
+  const handleRenameClick = (routine) => {
+    setIsRenaming(true);
+    setNewRoutineName(routine.name.replace('.txt', ''));
   };
 
-  // Helper function to sort active routines by day and time
-  const sortActiveRoutines = (routines) => {
-    // Only sort if routines is a non-empty array
-    if (!routines || routines.length === 0) {
-      setActiveRoutines([]);
+  const handleSaveRenameClick = (routine) => {
+    if (!newRoutineName || newRoutineName.endsWith('.txt')) {
+      alert("Invalid name. Must not be empty and should not end with '.txt'.");
       return;
     }
-    const now = new Date();
-    const sorted = [...routines].sort((a, b) => {
-      const aTime = new Date();
-      aTime.setDate(aTime.getDate() + (a.day || 1) - 1);
-      aTime.setHours(...(a.time || '00:00').split(':'));
-      const bTime = new Date();
-      bTime.setDate(bTime.getDate() + (b.day || 1) - 1);
-      bTime.setHours(...(b.time || '00:00').split(':'));
-      return aTime - bTime;
-    });
-    setActiveRoutines(sorted);
+    // Call the parent's function to handle the backend request
+    onRename(routine.name, `${newRoutineName}.txt`);
+    setIsRenaming(false);
+    setNewRoutineName('');
+    setSelectedRoutine(null);
+    setSelectedActiveRoutine(null);
   };
-
-  // Function to fetch all routine data from the backend
-  const fetchRoutineData = async () => {
-    setIsLoading(true);
-    setConnectionStatus('pending');
-    try {
-      const response = await fetch(`${PI_BACKEND_URL}/routines`);
-      if (!response.ok) {
-        console.error('Network response was not ok:', response.status, response.statusText);
-        setConnectionStatus('disconnected');
-        return;
-      }
-      
-      const data = await response.json();
-      
-      // Check if all_routines exists and is an array before sorting
-      if (data.all_routines && Array.isArray(data.all_routines)) {
-        setAllRoutines(data.all_routines.sort((a, b) => a.creationDate - b.creationDate));
-      } else {
-        setAllRoutines([]);
-      }
-      
-      // Check if active_routines exists and is an array before sorting
-      if (data.active_routines && Array.isArray(data.active_routines)) {
-        setActiveRoutines(data.active_routines);
-        sortActiveRoutines(data.active_routines);
-      } else {
-        setActiveRoutines([]);
-      }
-      
-      setConnectionStatus('connected');
-    } catch (error) {
-      console.error('Failed to fetch routine data:', error);
-      setConnectionStatus('disconnected');
-      setAllRoutines([]);
-      setActiveRoutines([]);
-    } finally {
-      setIsLoading(false);
-    }
+  
+  const handleDeleteRoutineClick = (routine) => {
+    setFileToDelete(routine);
+    setShowDeleteModal(true);
   };
-
-  useEffect(() => {
-    fetchRoutineData();
-    const intervalId = setInterval(fetchRoutineData, 10000); // Refresh every 10 seconds
-    return () => clearInterval(intervalId);
-  }, []);
-
-  // Handler for updating day/time inputs
-  const handleUpdateActiveRoutine = async (filename, day, time) => {
-    const updatedRoutines = activeRoutines.map((r) =>
-      r.name === filename ? { ...r, day: parseInt(day, 10), time } : r
-    );
-    setActiveRoutines(updatedRoutines);
-    sortActiveRoutines(updatedRoutines);
-    
-    try {
-      await fetch(`${PI_BACKEND_URL}/update-active-routine`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename, day, time }),
-      });
-    } catch (error) {
-      console.error('Failed to update routine:', error);
-      // Revert the local state on failure
-      fetchRoutineData();
-    }
-  };
-
-  // Handler for moving a routine to the active list
-  const handleMoveToActive = async () => {
-    if (!selectedRoutine) return;
-    try {
-      // Fetch the routine content to get the total runtime
-      const contentResponse = await fetch(`${PI_BACKEND_URL}/routine-content/${selectedRoutine.name}`);
-      const content = await contentResponse.json();
-      const runtimeInSeconds = parseRuntimeToSeconds(content.routineSummary.totalRuntime);
-      
-      let defaultDay = 1;
-      let defaultTime = '00:00';
-      
-      if (activeRoutines.length > 0) {
-        const sortedActive = [...activeRoutines].sort((a,b) => {
-          const aTime = new Date();
-          aTime.setDate(aTime.getDate() + (a.day || 1) - 1);
-          aTime.setHours(...(a.time || '00:00').split(':'));
-          const bTime = new Date();
-          bTime.setDate(bTime.getDate() + (b.day || 1) - 1);
-          bTime.setHours(...(b.time || '00:00').split(':'));
-          return aTime - bTime;
-        });
-        const lastRoutine = sortedActive[sortedActive.length - 1];
-        const lastTime = new Date();
-        const [lastHours, lastMinutes] = (lastRoutine.time || '00:00').split(':').map(Number);
-        lastTime.setDate(lastTime.getDate() + (lastRoutine.day || 1) - 1);
-        lastTime.setHours(lastHours, lastMinutes, 0, 0);
-
-        const newTime = new Date(lastTime.getTime() + runtimeInSeconds * 1000);
-        
-        defaultDay = Math.floor((newTime - new Date()) / (1000 * 60 * 60 * 24)) + 1;
-        if (defaultDay < 1) defaultDay = 1;
-        defaultTime = newTime.toTimeString().split(' ')[0].substring(0, 5);
-        
-      } else {
-        // Set to current time rounded to the nearest hour
-        const now = new Date();
-        now.setMinutes(now.getMinutes() + 30); // Round up
-        defaultDay = 1;
-        defaultTime = now.toTimeString().split(' ')[0].substring(0, 5);
-      }
-      
-      const moveResponse = await fetch(`${PI_BACKEND_URL}/move-routine`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: selectedRoutine.name, destination: 'active' }),
-      });
-      
-      if (moveResponse.ok) {
-        const updatedRoutines = [...activeRoutines, { ...selectedRoutine, day: defaultDay, time: defaultTime }];
-        setAllRoutines(allRoutines.filter((r) => r.name !== selectedRoutine.name));
-        setSelectedRoutine(null);
-        sortActiveRoutines(updatedRoutines);
-      }
-    } catch (error) {
-      console.error('Failed to move routine to active:', error);
-      fetchRoutineData(); // Re-sync state
-    }
-  };
-
-  // Handler for moving a routine to the inactive list
-  const handleMoveToInactive = async () => {
-    if (!selectedActiveRoutine) return;
-    try {
-      const response = await fetch(`${PI_BACKEND_URL}/move-routine`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: selectedActiveRoutine.name, destination: 'inactive' }),
-      });
-      if (response.ok) {
-        const updatedRoutines = [...allRoutines, selectedActiveRoutine];
-        setAllRoutines(updatedRoutines.sort((a, b) => a.creationDate - b.creationDate));
-        setActiveRoutines(activeRoutines.filter((r) => r.name !== selectedActiveRoutine.name));
-        setSelectedActiveRoutine(null);
-      }
-    } catch (error) {
-      console.error('Failed to move routine to inactive:', error);
-      fetchRoutineData(); // Re-sync state
+  
+  const confirmDelete = () => {
+    if (fileToDelete) {
+      // Call the parent's function to handle the backend request
+      onDeleteRoutine(fileToDelete.name);
+      setShowDeleteModal(false);
+      setFileToDelete(null);
+      setSelectedRoutine(null);
+      setSelectedActiveRoutine(null);
     }
   };
   
+  const handleMoveToActiveClick = () => {
+    if (selectedRoutine) {
+      onMoveToActive(selectedRoutine.name);
+      setSelectedRoutine(null);
+    }
+  };
+
+  const handleMoveToInactiveClick = () => {
+    if (selectedActiveRoutine) {
+      onMoveToInactive(selectedActiveRoutine.name);
+      setSelectedActiveRoutine(null);
+    }
+  };
+
   return (
-    <div className="flex flex-col gap-4 p-4 md:p-8 bg-gray-100 min-h-screen">
-      <div className="card-container">
-        <h1 className="main-title text-center text-3xl font-bold mb-4 text-gray-800">Pi Routine Manager</h1>
-        
-        <div className="status-block bg-white p-4 rounded-lg shadow-sm mb-4 border border-gray-200">
-          <div className="status-header flex items-center justify-between">
-            <span className="status-label text-sm font-medium text-gray-600">Connection Status</span>
-            <span
-              className={`status-indicator px-3 py-1 text-xs font-semibold rounded-full
-                          ${connectionStatus === 'connected' ? 'bg-green-200 text-green-800' : 'bg-red-200 text-red-800'}`}
-            >
-              {connectionStatus === 'connected' ? 'Connected' : 'Disconnected'}
-            </span>
-          </div>
-          {connectionStatus === 'disconnected' && (
-            <div className="mt-2 text-center">
+    <div>
+      <style jsx>{`
+        .main-container {
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          padding: 32px;
+          background-color: #f3f4f6;
+          min-height: 800px;
+          width: 900px;
+          margin: 0 auto;
+        }
+        .card-container {
+          width: 100%;
+        }
+        .main-title {
+          text-align: center;
+          font-size: 30px;
+          font-weight: 700;
+          margin-bottom: 16px;
+          color: #1f2937;
+        }
+        .columns-container {
+          display: flex;
+          flex-direction: row;
+          gap: 32px;
+        }
+        .column {
+          flex: 1;
+          padding: 16px;
+          background-color: #f9fafb;
+          border-radius: 8px;
+          box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+          border: 1px solid #e5e7eb;
+          min-width: 300px;
+        }
+        .column-title {
+          font-size: 20px;
+          font-weight: 700;
+          margin-bottom: 16px;
+          color: #1f2937;
+        }
+        .list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          max-height: 384px;
+          overflow-y: auto;
+          padding-right: 8px;
+        }
+        .list-item-base {
+          padding: 12px;
+          border-radius: 8px;
+          border: 1px solid;
+          cursor: pointer;
+          transition: background-color 0.2s ease-in-out;
+        }
+        .list-item-selected {
+          background-color: #bfdbfe;
+          border-color: #3b82f6;
+        }
+        .list-item-unselected {
+          background-color: #ffffff;
+          border-color: #e5e7eb;
+        }
+        .list-item-unselected:hover {
+          background-color: #f3f4f6;
+        }
+        .list-item-content {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+        .list-item-text {
+          font-size: 14px;
+          font-weight: 500;
+          color: #1f2937;
+        }
+        .loading-text {
+          font-size: 14px;
+          color: #6b7280;
+          font-style: italic;
+        }
+        .transfer-buttons-container {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 16px;
+          margin: auto 0;
+        }
+        .transfer-button-base {
+          padding: 12px;
+          background-color: #3b82f6;
+          color: #ffffff;
+          border-radius: 9999px;
+          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+          transition: background-color 0.15s ease-in-out;
+        }
+        .transfer-button-base:hover:not(:disabled) {
+          background-color: #2563eb;
+        }
+        .transfer-button-base:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .input-container {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .input-number {
+          width: 48px;
+          text-align: center;
+          padding: 4px;
+          border: 1px solid;
+          border-radius: 4px;
+        }
+        .input-time {
+          width: 96px;
+          padding: 4px;
+          border: 1px solid;
+          border-radius: 4px;
+        }
+        .save-button {
+          margin-left: 8px;
+          padding: 4px 12px;
+          background-color: #10b981;
+          color: white;
+          border-radius: 6px;
+          font-size: 14px;
+          transition: background-color 0.15s ease-in-out;
+        }
+        .save-button:hover {
+          background-color: #059669;
+        }
+        .save-button:disabled {
+          background-color: #9ca3af;
+          cursor: not-allowed;
+        }
+        .action-buttons {
+          display: flex;
+          gap: 8px;
+          margin-top: 8px;
+          justify-content: flex-end;
+        }
+        .rename-button, .delete-button {
+          padding: 6px 12px;
+          font-size: 14px;
+          border-radius: 6px;
+          cursor: pointer;
+          transition: background-color 0.15s ease-in-out;
+        }
+        .rename-button {
+          background-color: #f59e0b;
+          color: white;
+        }
+        .rename-button:hover {
+          background-color: #d97706;
+        }
+        .delete-button {
+          background-color: #ef4444;
+          color: white;
+        }
+        .delete-button:hover {
+          background-color: #dc2626;
+        }
+        .modal {
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background-color: rgba(0, 0, 0, 0.5);
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          z-index: 1000;
+        }
+        .modal-content {
+          background: white;
+          padding: 24px;
+          border-radius: 8px;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+          text-align: center;
+          width: 400px;
+        }
+        .modal-buttons {
+          margin-top: 16px;
+          display: flex;
+          justify-content: center;
+          gap: 16px;
+        }
+        .confirm-delete, .cancel-delete {
+          padding: 8px 16px;
+          font-size: 16px;
+          border-radius: 6px;
+          cursor: pointer;
+        }
+        .confirm-delete {
+          background-color: #ef4444;
+          color: white;
+        }
+        .cancel-delete {
+          background-color: #e5e7eb;
+          color: #4b5563;
+        }
+      `}</style>
+      <div className="main-container">
+        <div className="card-container">
+          <h1 className="main-title">Routine Manager</h1>
+          
+          <div className="columns-container">
+            {/* All Routines Column */}
+            <div className="column">
+              <h2 className="column-title">Routines</h2>
+              <ul className="list">
+                {isLoading ? (
+                  <p className="loading-text">Loading...</p>
+                ) : (
+                  allRoutines.map((routine) => (
+                    <li
+                      key={routine.name}
+                      className={`list-item-base ${selectedRoutine?.name === routine.name ? 'list-item-selected' : 'list-item-unselected'}`}
+                      onClick={() => {
+                        setSelectedRoutine(routine);
+                        setSelectedActiveRoutine(null);
+                      }}
+                    >
+                      <div className="list-item-content">
+                        <span className="list-item-text">{routine.name}</span>
+                      </div>
+                    </li>
+                  ))
+                )}
+              </ul>
+              {selectedRoutine && (
+                <div className="action-buttons">
+                  {isRenaming && selectedRoutine.name === selectedRoutine.name && (
+                    <div className="input-container">
+                      <input
+                        type="text"
+                        value={newRoutineName}
+                        onChange={(e) => setNewRoutineName(e.target.value)}
+                        className="input-number"
+                      />
+                      <button onClick={() => handleSaveRenameClick(selectedRoutine)} className="save-button">
+                        Save Name
+                      </button>
+                    </div>
+                  )}
+                  {!isRenaming && (
+                    <>
+                      <button onClick={() => handleRenameClick(selectedRoutine)} className="rename-button">
+                        Rename
+                      </button>
+                      <button onClick={() => handleDeleteRoutineClick(selectedRoutine)} className="delete-button">
+                        Delete
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Transfer Buttons */}
+            <div className="transfer-buttons-container">
               <button
-                onClick={fetchRoutineData}
-                className="px-4 py-2 bg-blue-500 text-white font-medium rounded-lg shadow-md hover:bg-blue-600 transition-colors"
+                onClick={handleMoveToActiveClick}
+                disabled={!selectedRoutine}
+                className="transfer-button-base"
+                title="Move to Active"
               >
-                Reconnect
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                </svg>
+              </button>
+              <button
+                onClick={handleMoveToInactiveClick}
+                disabled={!selectedActiveRoutine}
+                className="transfer-button-base"
+                title="Move to Available"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                </svg>
               </button>
             </div>
-          )}
-        </div>
 
-        <div className="flex flex-col md:flex-row gap-8">
-          {/* All Routines Column */}
-          <div className="flex-1 p-4 bg-gray-50 rounded-lg shadow-sm border border-gray-200">
-            <h2 className="text-xl font-bold mb-4 text-gray-800">Available Routines</h2>
-            <ul className="space-y-2 max-h-96 overflow-y-auto pr-2">
-              {isLoading ? (
-                <p className="text-sm text-gray-500 italic">Loading...</p>
-              ) : (
-                allRoutines.map((routine) => (
-                  <li
-                    key={routine.name}
-                    className={`p-3 rounded-lg border cursor-pointer transition-colors duration-200
-                              ${selectedRoutine?.name === routine.name ? 'bg-blue-200 border-blue-500' : 'bg-white border-gray-200 hover:bg-gray-100'}`}
-                    onClick={() => setSelectedRoutine(routine)}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium text-gray-800">{routine.name}</span>
-                    </div>
-                  </li>
-                ))
-              )}
-            </ul>
-          </div>
-
-          {/* Transfer Buttons */}
-          <div className="flex flex-col items-center justify-center space-y-4 my-auto">
-            <button
-              onClick={handleMoveToActive}
-              disabled={!selectedRoutine}
-              className="p-3 bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              title="Move to Active"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-              </svg>
-            </button>
-            <button
-              onClick={handleMoveToInactive}
-              disabled={!selectedActiveRoutine}
-              className="p-3 bg-blue-500 text-white rounded-full shadow-md hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              title="Move to Available"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Active Routines Column */}
-          <div className="flex-1 p-4 bg-gray-50 rounded-lg shadow-sm border border-gray-200">
-            <h2 className="text-xl font-bold mb-4 text-gray-800">Active Routines</h2>
-            <ul className="space-y-2 max-h-96 overflow-y-auto pr-2">
-              {isLoading ? (
-                <p className="text-sm text-gray-500 italic">Loading...</p>
-              ) : activeRoutines.length === 0 ? (
-                <p className="text-sm text-gray-500 italic">No active routines.</p>
-              ) : (
-                activeRoutines.map((routine) => (
-                  <li
-                    key={routine.name}
-                    className={`p-3 rounded-lg border cursor-pointer transition-colors duration-200
-                              ${selectedActiveRoutine?.name === routine.name ? 'bg-blue-200 border-blue-500' : 'bg-white border-gray-200 hover:bg-gray-100'}`}
-                    onClick={() => setSelectedActiveRoutine(routine)}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium text-gray-800">{routine.name}</span>
-                      <div className="flex items-center space-x-2">
-                        <input
-                          type="number"
-                          className="w-12 text-center p-1 border rounded"
-                          value={routine.day || 1}
-                          onChange={(e) => handleUpdateActiveRoutine(routine.name, e.target.value, routine.time)}
-                          min="1"
-                        />
-                        <input
-                          type="time"
-                          className="w-24 p-1 border rounded"
-                          value={routine.time || '00:00'}
-                          onChange={(e) => handleUpdateActiveRoutine(routine.name, routine.day, e.target.value)}
-                        />
+            {/* Active Routines Column */}
+            <div className="column">
+              <h2 className="column-title">Active Routines</h2>
+              <ul className="list">
+                {isLoading ? (
+                  <p className="loading-text">Loading...</p>
+                ) : activeRoutines.length === 0 ? (
+                  <p className="loading-text">No active routines.</p>
+                ) : (
+                  activeRoutines.map((routine) => (
+                    <li
+                      key={routine.originalName}
+                      className={`list-item-base ${selectedActiveRoutine?.originalName === routine.originalName ? 'list-item-selected' : 'list-item-unselected'}`}
+                      onClick={() => {
+                        setSelectedActiveRoutine(routine);
+                        setSelectedRoutine(null);
+                      }}
+                    >
+                      <div className="list-item-content">
+                        <span className="list-item-text">{routine.name}</span>
+                        <div className="input-container">
+                          <input
+                            type="number"
+                            className="input-number"
+                            value={routine.day || 1}
+                            onChange={(e) => onLocalUpdateActiveRoutine(routine.originalName, e.target.value, routine.time)}
+                            min="1"
+                            max="7"
+                          />
+                          <input
+                            type="time"
+                            className="input-time"
+                            value={routine.time || '00:00'}
+                            onChange={(e) => onLocalUpdateActiveRoutine(routine.originalName, routine.day, e.target.value)}
+                          />
+                          <button
+                            onClick={() => onSaveSchedule(routine)}
+                            className="save-button"
+                          >
+                            Save
+                          </button>
+                        </div>
                       </div>
+                    </li>
+                  ))
+                )}
+              </ul>
+              {selectedActiveRoutine && (
+                <div className="action-buttons">
+                  {isRenaming && selectedActiveRoutine.name === selectedActiveRoutine.name && (
+                    <div className="input-container">
+                      <input
+                        type="text"
+                        value={newRoutineName}
+                        onChange={(e) => setNewRoutineName(e.target.value)}
+                        className="input-number"
+                      />
+                      <button onClick={() => handleSaveRenameClick(selectedActiveRoutine)} className="save-button">
+                        Save Name
+                      </button>
                     </div>
-                  </li>
-                ))
+                  )}
+                  {!isRenaming && (
+                    <>
+                      <button onClick={() => handleRenameClick(selectedActiveRoutine)} className="rename-button">
+                        Rename
+                      </button>
+                      <button onClick={() => handleDeleteRoutineClick(selectedActiveRoutine)} className="delete-button">
+                        Delete
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
-            </ul>
+            </div>
           </div>
         </div>
       </div>
+      
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && (
+        <div className="modal">
+          <div className="modal-content">
+            <h3 className="text-lg font-bold">Confirm Deletion</h3>
+            <p className="mt-2">Are you sure you want to delete <span className="font-semibold">{fileToDelete?.name}</span>?</p>
+            <div className="modal-buttons">
+              <button onClick={confirmDelete} className="confirm-delete">
+                Confirm Delete
+              </button>
+              <button onClick={() => setShowDeleteModal(false)} className="cancel-delete">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

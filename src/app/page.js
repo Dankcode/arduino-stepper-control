@@ -1,12 +1,144 @@
-// pages/index.js
 'use client';
-import { useState } from 'react';
-import ManualControl from '../components/ManualControl'; // Assuming these components exist
-import RoutineBuilder from '../components/RoutineBuilder'; // Assuming these components exist
-import PiRoutineManager from '../components/PiRoutineManager'; // Import the new component
+import { useState, useEffect, useCallback } from 'react';
+import StepperMotorControl from '../components/ManualControl'; 
+import RoutineBuilder from '../components/RoutineBuilder'; 
+import PiRoutineManager from '../components/PiRoutineManager'; 
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('routine');
+  const [connectionStatus, setConnectionStatus] = useState('Disconnected');
+  const [allRoutines, setAllRoutines] = useState([]);
+  const [activeRoutines, setActiveRoutines] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // The actual backend URL for the Raspberry Pi
+  const PI_BACKEND_URL = 'http://192.168.1.3:5000';
+
+  /**
+   * Fetches routine data from the backend and updates the state.
+   */
+  const fetchRoutineData = async () => {
+    setIsLoading(true);
+    setConnectionStatus('Connecting...');
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/routines`);
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+      const data = await response.json();
+      
+      setAllRoutines(data.all_routines.sort((a, b) => a.creationDate - b.creationDate));
+      setActiveRoutines(data.active_routines);
+      setConnectionStatus('Connected');
+    } catch (error) {
+      console.error('Failed to fetch routine data:', error);
+      setConnectionStatus('Disconnected');
+      setAllRoutines([]);
+      setActiveRoutines([]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // useEffect to handle the initial fetch and subsequent refresh interval
+  useEffect(() => {
+    fetchRoutineData();
+
+    // Set up an interval to refresh the data every 10 seconds
+    const intervalId = setInterval(fetchRoutineData, 10000); 
+    
+    // Clean up the interval on component unmount
+    return () => clearInterval(intervalId);
+  }, []); // Empty dependency array ensures this runs once on mount
+
+  // Callback function to handle local updates to active routines
+  const handleLocalUpdateActiveRoutine = useCallback((originalName, day, time) => {
+    const updatedRoutines = activeRoutines.map((r) =>
+      r.originalName === originalName ? { ...r, day: parseInt(day, 10), time } : r
+    );
+    setActiveRoutines(updatedRoutines);
+  }, [activeRoutines]);
+
+  // Backend interaction functions
+  const handleSaveSchedule = async (routine) => {
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(routine),
+      });
+      if (!response.ok) throw new Error('Failed to save schedule');
+      await fetchRoutineData(); // Refresh data after saving
+    } catch (error) {
+      console.error('Error saving schedule:', error);
+      // In a real app, you would handle this gracefully (e.g., show an error message)
+    }
+  };
+
+  const handleRename = async (originalName, newName) => {
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ originalName, newName }),
+      });
+      if (!response.ok) throw new Error('Failed to rename routine');
+      await fetchRoutineData(); // Refresh data
+    } catch (error) {
+      console.error('Error renaming routine:', error);
+    }
+  };
+
+  const handleDeleteRoutine = async (fileName) => {
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName }),
+      });
+      if (!response.ok) throw new Error('Failed to delete routine');
+      await fetchRoutineData(); // Refresh data
+    } catch (error) {
+      console.error('Error deleting routine:', error);
+    }
+  };
+
+  const handleMoveToActive = async (routineName) => {
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/activate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ routineName }),
+      });
+      if (!response.ok) throw new Error('Failed to move to active');
+      await fetchRoutineData();
+    } catch (error) {
+      console.error('Error moving routine to active:', error);
+    }
+  };
+
+  const handleMoveToInactive = async (routineName) => {
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/deactivate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ routineName }),
+      });
+      if (!response.ok) throw new Error('Failed to move to inactive');
+      await fetchRoutineData();
+    } catch (error) {
+      console.error('Error moving routine to inactive:', error);
+    }
+  };
+
+  const getStatusIndicatorClass = () => {
+    if (connectionStatus === 'Connected') {
+      return 'status-indicator-dot connected';
+    } else if (connectionStatus === 'Connecting...') {
+      return 'status-indicator-dot connecting';
+    }
+    return 'status-indicator-dot disconnected';
+  };
 
   return (
     <div className="main-wrapper">
@@ -28,46 +160,94 @@ export default function Home() {
 
         .main-wrapper {
           width: 100%;
-          max-width: 64rem; /* max-w-4xl (1024px) */
+          max-width: 64rem;
           margin-left: auto;
           margin-right: auto;
-          padding: 2rem; /* p-8 */
+          padding: 2rem;
           box-sizing: border-box;
           display: flex;
           flex-direction: column;
-          align-items: center; /* Center content horizontally */
+          align-items: center;
+          position: relative;
         }
 
         .main-title {
-          font-size: 2.25rem; /* text-3xl */
-          font-weight: 700; /* font-bold */
-          margin-bottom: 1.5rem; /* mb-6 */
-          color: #1a202c; /* gray-800 */
+          font-size: 2.25rem;
+          font-weight: 700;
+          margin-bottom: 1.5rem;
+          color: #1a202c;
           text-align: center;
+        }
+        
+        .connection-status-box {
+          position: absolute;
+          top: 1rem;
+          right: 1rem;
+          padding: 0.5rem 1rem;
+          background-color: #ffffff;
+          border-radius: 0.5rem;
+          box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+          border: 1px solid #e2e8f0;
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          font-size: 0.875rem;
+          font-weight: 500;
+          color: #4b5563;
+          z-index: 10;
+        }
+        
+        .status-indicator-dot {
+          height: 0.75rem;
+          width: 0.75rem;
+          border-radius: 9999px;
+        }
+        
+        .status-indicator-dot.connected {
+          background-color: #10b981;
+        }
+        
+        .status-indicator-dot.connecting {
+          background-color: #f59e0b;
+          animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        .status-indicator-dot.disconnected {
+          background-color: #ef4444;
+          animation: none;
+        }
+
+        @keyframes pulse {
+          0%, 100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: .5;
+          }
         }
 
         .tab-section {
-          margin-bottom: 1.5rem; /* mb-6 */
-          width: 100%; /* Ensure it spans the width for the border */
+          margin-bottom: 1.5rem;
+          width: 100%;
         }
 
         .tab-border-container {
-          border-bottom: 1px solid #e2e8f0; /* border-b border-gray-200 */
+          border-bottom: 1px solid #e2e8f0;
         }
 
         .tab-nav {
           display: flex;
-          margin-bottom: -1px; /* -mb-px to align with border */
+          margin-bottom: -1px;
         }
 
         .tab-button {
-          padding-top: 0.5rem; /* py-2 */
-          padding-bottom: 0.5rem; /* py-2 */
-          padding-left: 1rem; /* px-4 */
-          padding-right: 1rem; /* px-4 */
+          padding-top: 0.5rem;
+          padding-bottom: 0.5rem;
+          padding-left: 1rem;
+          padding-right: 1rem;
           border-bottom-width: 2px;
-          font-weight: 500; /* font-medium */
-          font-size: 0.875rem; /* text-sm */
+          font-weight: 500;
+          font-size: 0.875rem;
           cursor: pointer;
           background: none;
           border-left: none;
@@ -77,283 +257,89 @@ export default function Home() {
         }
 
         .tab-button.active {
-          border-color: #3b82f6; /* border-blue-500 */
-          color: #2563eb; /* text-blue-600 */
+          border-color: #3b82f6;
+          color: #2563eb;
         }
 
         .tab-button.inactive {
           border-color: transparent;
-          color: #6b7280; /* text-gray-500 */
+          color: #6b7280;
         }
 
         .tab-button.inactive:hover {
-          color: #4b5563; /* hover:text-gray-700 */
-          border-color: #d1d5db; /* hover:border-gray-300 */
+          color: #4b5563;
+          border-color: #d1d5db;
         }
 
-        .tab-button + .tab-button { /* ml-8 for the second button */
+        .tab-button + .tab-button {
           margin-left: 2rem;
         }
-
-        /* Styles from StepperMotorControl.module.css, adapted for global use */
+        
         .card {
           background-color: #ffffff;
           padding: 2rem;
-          border-radius: 1.5rem; /* 24px */
-          box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04); /* shadow-2xl */
+          border-radius: 1.5rem;
+          box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
           width: 100%;
-          max-width: 28rem; /* max-w-md (448px) */
-          border: 1px solid #e2e8f0; /* border-gray-200 */
+          max-width: 28rem;
+          border: 1px solid #e2e8f0;
         }
 
-        .title { /* This will apply to h1 inside ManualControl/RoutineBuilder if they use this class */
-          font-size: 2.25rem; /* 3xl */
-          font-weight: 800; /* font-extrabold */
+        .title {
+          font-size: 2.25rem;
+          font-weight: 800;
           text-align: center;
-          color: #1a202c; /* gray-900 */
-          margin-bottom: 2rem; /* mb-8 */
+          color: #1a202c;
+          margin-bottom: 2rem;
         }
-
-        .message-display {
-          padding: 0.75rem; /* p-3 */
-          border-radius: 0.5rem; /* rounded-lg */
-          background-color: #f3f4f6; /* gray-100 */
-          border: 1px solid #e5e7eb; /* border */
-          margin-top: 1rem; /* mt-4 */
-          margin-bottom: 1rem; /* mb-4 */
-        }
-
-        .message-text {
-          font-size: 0.875rem; /* text-sm */
-          color: #4b5563; /* gray-700 */
-        }
-
-        .status-block, .input-section {
-          margin-bottom: 1.5rem; /* mb-6 */
-          padding: 0.75rem; /* p-3 */
-          border-radius: 0.5rem; /* rounded-lg */
-          background-color: #f9fafb; /* gray-50 */
-        }
-
-        .status-header {
+        
+        .modal {
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          background-color: rgba(0, 0, 0, 0.5);
           display: flex;
+          justify-content: center;
           align-items: center;
-          justify-content: space-between;
-          margin-bottom: 0.5rem; /* mb-2 */
+          z-index: 1000;
         }
-
-        .status-label {
-          font-size: 0.875rem; /* text-sm */
-          font-weight: 500; /* font-medium */
-          color: #4a5568; /* gray-700 */
+        .modal-content {
+          background: white;
+          padding: 24px;
+          border-radius: 8px;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+          text-align: center;
+          width: 400px;
         }
-
-        .status-indicator {
-          padding: 0.25rem 0.5rem; /* px-2 py-1 */
-          border-radius: 0.25rem; /* rounded */
-          font-size: 0.75rem; /* text-xs */
-          font-weight: 500; /* font-medium */
-        }
-
-        .status-indicator.connected {
-          background-color: #d1fae5; /* green-100 */
-          color: #065f46; /* green-800 */
-        }
-
-        .status-indicator.disconnected {
-          background-color: #fee2e2; /* red-100 */
-          color: #b91c1c; /* red-800 */
-        }
-
-        .flex-buttons-group {
+        .modal-buttons {
+          margin-top: 16px;
           display: flex;
-          gap: 0.5rem; /* space-x-2 */
+          justify-content: center;
+          gap: 16px;
         }
-
-        .btn {
-          padding: 0.75rem 1rem; /* px-3 py-2 */
-          font-weight: 500; /* font-medium */
-          border-radius: 0.25rem; /* rounded */
-          transition: background-color 0.2s ease-in-out, opacity 0.2s ease-in-out;
+        .confirm-delete, .cancel-delete {
+          padding: 8px 16px;
+          font-size: 16px;
+          border-radius: 6px;
           cursor: pointer;
-          border: none;
-          flex: 1; /* flex-1 */
         }
-
-        .btn:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
+        .confirm-delete {
+          background-color: #ef4444;
+          color: white;
         }
-
-        .btn-connect {
-          background-color: #2563eb; /* blue-600 */
-          color: #ffffff;
-        }
-
-        .btn-connect:hover:not(:disabled) {
-          background-color: #1d4ed8; /* blue-700 */
-        }
-
-        .btn-disconnect {
-          background-color: #dc2626; /* red-600 */
-          color: #ffffff;
-        }
-
-        .btn-disconnect:hover:not(:disabled) {
-          background-color: #b91c1c; /* red-700 */
-        }
-
-        .input-label {
-          display: block;
-          font-size: 0.875rem; /* text-sm */
-          font-weight: 500; /* font-medium */
-          color: #4a5568; /* gray-700 */
-          margin-bottom: 0.5rem; /* mb-2 */
-        }
-
-        .input-field {
-          flex: 1; /* flex-1 */
-          padding: 0.5rem 0.75rem; /* px-3 py-2 */
-          border: 1px solid #cbd5e0; /* border-gray-300 */
-          border-radius: 0.25rem; /* rounded */
-          font-size: 0.875rem; /* text-sm */
-          outline: none;
-          transition: border-color 0.2s, box-shadow 0.2s;
-        }
-
-        .input-field:focus {
-          border-color: #3b82f6; /* blue-500 */
-          box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5); /* focus:ring-2 focus:ring-blue-500 */
-        }
-
-        .btn-update-steps {
-          padding: 0.5rem 1rem; /* px-4 py-2 */
-          background-color: #16a34a; /* green-600 */
-          color: #ffffff;
-        }
-
-        .btn-update-steps:hover {
-          background-color: #15803d; /* green-700 */
-        }
-
-        .motor-buttons-group {
-          display: flex;
-          flex-direction: column;
-          gap: 0.75rem; /* space-y-3 */
-          margin-bottom: 1.5rem; /* mb-6 */
-        }
-
-        .btn-motor {
-          width: 100%; /* w-full */
-          padding: 0.75rem 1rem; /* px-4 py-3 */
-          font-weight: 500; /* font-medium */
-          border-radius: 0.25rem; /* rounded */
-          color: #ffffff;
-          transition: background-color 0.2s ease-in-out, opacity 0.2s ease-in-out;
-          cursor: pointer;
-          border: none;
-        }
-
-        .btn-motor:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .btn-motor.blue {
-          background-color: #2563eb; /* blue-600 */
-        }
-        .btn-motor.blue:hover:not(:disabled) {
-          background-color: #1d4ed8; /* blue-700 */
-        }
-
-        .btn-motor.purple {
-          background-color: #9333ea; /* purple-600 */
-        }
-        .btn-motor.purple:hover:not(:disabled) {
-          background-color: #7e22ce; /* purple-700 */
-        }
-
-        .btn-motor.green {
-          background-color: #16a34a; /* green-600 */
-        }
-        .btn-motor.green:hover:not(:disabled) {
-          background-color: #15803d; /* green-700 */
-        }
-
-        .btn-motor.red {
-          background-color: #dc2626; /* red-600 */
-        }
-        .btn-motor.red:hover:not(:disabled) {
-          background-color: #b91c1c; /* red-700 */
-        }
-
-        .btn-motor.yellow {
-          background-color: #d97706; /* yellow-600 */
-          color: #ffffff; /* text-white */
-        }
-        .btn-motor.yellow:hover:not(:disabled) {
-          background-color: #b45309; /* yellow-700 */
-        }
-
-        .loading-spinner {
-          display: inline-block;
-          animation: spin 1s linear infinite;
-          border: 2px solid rgba(0, 0, 0, 0.1);
-          border-top-color: #2563eb; /* blue-600 */
-          border-radius: 50%;
-          height: 1.5rem; /* h-6 */
-          width: 1.5rem; /* w-6 */
-        }
-
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-
-        /* Responsive adjustments */
-        @media (max-width: 640px) {
-          .main-wrapper {
-            padding: 1rem;
-          }
-          .main-title {
-            font-size: 1.75rem;
-            margin-bottom: 1rem;
-          }
-          .tab-button {
-            padding: 0.4rem 0.8rem;
-            font-size: 0.8rem;
-          }
-          .tab-button + .tab-button {
-            margin-left: 1rem;
-          }
-          .card {
-            padding: 1.5rem;
-            border-radius: 1rem;
-          }
-          .title {
-            font-size: 1.75rem; /* Smaller title on small screens */
-            margin-bottom: 1.5rem;
-          }
-          .status-block, .input-section, .motor-buttons-group {
-            margin-bottom: 1rem;
-          }
-          .btn, .input-field {
-            padding: 0.6rem 0.8rem;
-            font-size: 0.8rem;
-          }
-          .btn-motor {
-            padding: 0.6rem 0.8rem;
-            font-size: 0.9rem;
-          }
-          .status-label {
-            font-size: 0.8rem;
-          }
-          .status-indicator {
-            font-size: 0.65rem;
-            padding: 0.15rem 0.4rem;
-          }
+        .cancel-delete {
+          background-color: #e5e7eb;
+          color: #4b5563;
         }
       `}</style>
+
+      <div className="connection-status-box">
+        Connection:
+        <span className={getStatusIndicatorClass()} />
+        {connectionStatus}
+      </div>
 
       <h1 className="main-title">Arduino Stepper Motor Control</h1>
 
@@ -362,25 +348,19 @@ export default function Home() {
           <nav className="tab-nav">
             <button
               onClick={() => setActiveTab('routine')}
-              className={`tab-button ${
-                activeTab === 'routine' ? 'active' : 'inactive'
-              }`}
+              className={`tab-button ${activeTab === 'routine' ? 'active' : 'inactive'}`}
             >
               Routine Builder
             </button>
             <button
               onClick={() => setActiveTab('manual')}
-              className={`tab-button ${
-                activeTab === 'manual' ? 'active' : 'inactive'
-              }`}
+              className={`tab-button ${activeTab === 'manual' ? 'active' : 'inactive'}`}
             >
               Manual Control
             </button>
             <button
               onClick={() => setActiveTab('pi')}
-              className={`tab-button ${
-                activeTab === 'pi' ? 'active' : 'inactive'
-              }`}
+              className={`tab-button ${activeTab === 'pi' ? 'active' : 'inactive'}`}
             >
               Pi Routines
             </button>
@@ -389,8 +369,20 @@ export default function Home() {
       </div>
 
       {activeTab === 'routine' && <RoutineBuilder />}
-      {activeTab === 'manual' && <ManualControl />}
-      {activeTab === 'pi' && <PiRoutineManager />}
+      {activeTab === 'manual' && <StepperMotorControl />}
+      {activeTab === 'pi' && (
+        <PiRoutineManager 
+          allRoutines={allRoutines}
+          activeRoutines={activeRoutines}
+          isLoading={isLoading}
+          onLocalUpdateActiveRoutine={handleLocalUpdateActiveRoutine}
+          onSaveSchedule={handleSaveSchedule}
+          onRename={handleRename}
+          onDeleteRoutine={handleDeleteRoutine}
+          onMoveToActive={handleMoveToActive}
+          onMoveToInactive={handleMoveToInactive}
+        />
+      )}
     </div>
   );
 }

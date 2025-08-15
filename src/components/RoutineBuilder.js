@@ -1,6 +1,9 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import MergedPlateTable from './MergedPlateTable';
 import { wellSchema } from './plateSchema';
+
+// The base URL for the Raspberry Pi backend.
+const PI_BACKEND_URL = 'http://192.168.1.3:5000';
 
 // Helper function to get row and column counts for a given layout.
 const getLayoutDimensions = (layout) => {
@@ -32,7 +35,7 @@ const createDefaultFilename = () => {
   const now = new Date();
   const date = now.toISOString().split('T')[0];
   const time = now.toTimeString().split(' ')[0].replace(/:/g, '-');
-  return `${date}-${time}-wellplates-wellplates2`;
+  return `${date}-${time}`;
 };
 
 const RoutineBuilder = () => {
@@ -54,9 +57,20 @@ const RoutineBuilder = () => {
 
   // State for the coordinates of the currently selected well (for single well input/copy source)
   const [selectedWellCoords, setSelectedWellCoords] = useState(null);
-
   // State for the custom filename
   const [filename, setFilename] = useState(createDefaultFilename());
+  // State for displaying messages to the user (e.g., success/error)
+  const [message, setMessage] = useState('');
+  // State to indicate if an action is in progress
+  const [loading, setLoading] = useState(false);
+
+  // A memoized map of quadrant properties for easy access
+  const quadrantMap = {
+    topLeft: { startRow: 0, startCol: 0 },
+    topRight: { startRow: 0, startCol: 12 },
+    bottomLeft: { startRow: 8, startCol: 0 },
+    bottomRight: { startRow: 8, startCol: 12 },
+  };
 
   // Handle well selection for copy/paste source and value input
   const handleWellSelect = (rowIndex, colIndex) => {
@@ -74,7 +88,6 @@ const RoutineBuilder = () => {
   }, []);
 
   // useMemo hook to calculate the total runtime whenever quadrantData changes.
-  // This is the part that automatically updates the display when you edit a well.
   const totalRuntime = useMemo(() => {
     let total = 0;
     
@@ -118,20 +131,21 @@ const RoutineBuilder = () => {
     const sanitizedName = e.target.value.replace(/[^a-zA-Z0-9-_.]/g, '');
     setFilename(sanitizedName);
   };
+  
+  // Combines the logic for creating and uploading the routine to the backend.
+  const handleSaveAndUploadRoutine = async () => {
+    if (!filename) {
+      setMessage('Please enter a filename.');
+      return;
+    }
 
-  // Save routine to a text file with the new structured format
-  const handleSaveRoutine = () => {
-    // Start with an object that contains the total runtime in a summary section
-    const routineData = [
-      {
-        routineSummary: {
-          totalRuntime: formatTime(totalRuntime),
-        },
-      },
-    ];
+    setLoading(true);
+    setMessage('Uploading routine...');
+
+    // Process all quadrant data into the required JSON format
+    const routineData = [];
     
-    // Helper function to process a quadrant's data
-    const processQuadrant = (quadrantName, quadrantDataArray, plateType) => {
+    const processQuadrant = (quadrantDataArray, plateType) => {
       if (plateType === 'none' || !quadrantDataArray) {
         return [];
       }
@@ -159,7 +173,6 @@ const RoutineBuilder = () => {
       return wells;
     };
     
-    // Process each quadrant and add to the plates array in the specified order
     const quadrants = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
     let plateNumber = 1;
     quadrants.forEach(quadrant => {
@@ -167,7 +180,6 @@ const RoutineBuilder = () => {
       const quadrantDataArray = quadrantData[quadrant];
 
       const quadrantProcessedData = processQuadrant(
-        quadrant,
         quadrantDataArray,
         layout
       );
@@ -180,38 +192,30 @@ const RoutineBuilder = () => {
 
     const routineString = JSON.stringify(routineData, null, 2);
     const blob = new Blob([routineString], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename + '.txt';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  // Upload routine to Python backend
-  const handleUploadRoutine = async (file) => {
-    if (!file) {
-      return;
-    }
-
+    const file = new File([blob], `${filename}.txt`, { type: 'text/plain' });
+    
     const formData = new FormData();
     formData.append('routine_file', file);
-
+    
     try {
-      const response = await fetch('http://localhost:5000/upload_routine', {
+      const response = await fetch(`${PI_BACKEND_URL}/upload_routine`, {
         method: 'POST',
         body: formData,
       });
 
       if (response.ok) {
         const result = await response.json();
+        setMessage(result.message || 'Routine uploaded successfully!');
       } else {
         const errorText = await response.text();
+        setMessage(`Error: ${errorText}`);
+        console.error('Upload failed:', response.status, errorText);
       }
     } catch (error) {
-      console.error('Error uploading routine:', error);
+      setMessage('Failed to upload routine. Check the backend connection.');
+      console.error('Network error during upload:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -372,6 +376,28 @@ const RoutineBuilder = () => {
             width: 100%;
             text-align: center;
         }
+
+        .repeat-schedule-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .repeat-schedule-group .input-group {
+            width: 100%;
+            justify-content: space-between;
+        }
+
+        .repeat-schedule-group select,
+        .repeat-schedule-group input[type="time"] {
+            padding: 0.4rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.3rem;
+            font-size: 0.85rem;
+            flex-grow: 1;
+            box-sizing: border-box;
+        }
         
         .runtime-display {
           font-size: 0.9rem;
@@ -380,8 +406,35 @@ const RoutineBuilder = () => {
           text-align: center;
           margin-top: 0.75rem;
         }
+        
+        .message-display {
+          padding: 0.75rem;
+          border-radius: 0.5rem;
+          background-color: #f3f4f6;
+          border: 1px solid #e5e7eb;
+          margin-top: 1rem;
+          margin-bottom: 1rem;
+          text-align: center;
+        }
+
+        .message-text {
+          font-size: 0.875rem;
+          color: #4b5563;
+        }
+
+        .loading-spinner {
+          display: inline-block;
+          animation: spin 1s linear infinite;
+          border: 2px solid rgba(0, 0, 0, 0.1);
+          border-top-color: #10b981;
+          border-radius: 50%;
+          height: 1.5rem;
+          width: 1.5rem;
+          margin-top: 1rem;
+        }
       `}</style>
       <div className="control-panel">
+
         {/* Global Controls */}
         <div className="panel-section control-buttons-group">
           <h2>Routine Actions</h2>
@@ -400,20 +453,12 @@ const RoutineBuilder = () => {
             />
           </div>
           <button
-            onClick={handleSaveRoutine}
+            onClick={handleSaveAndUploadRoutine}
             className="control-button save-button"
+            disabled={loading}
           >
-            Save Routine (.txt)
+            {loading ? 'Uploading...' : 'Save & Upload Routine'}
           </button>
-          <label className="control-button upload-label">
-            Upload Routine to Backend
-            <input
-              type="file"
-              accept=".txt"
-              className="upload-input"
-              onChange={(e) => handleUploadRoutine(e.target.files[0])}
-            />
-          </label>
         </div>
         
         {/* Total Runtime Display */}
@@ -423,6 +468,20 @@ const RoutineBuilder = () => {
             {formatTime(totalRuntime)}
           </div>
         </div>
+
+        {/* Message Display */}
+        {message && (
+          <div className="message-display">
+            <p className="message-text">{message}</p>
+          </div>
+        )}
+
+        {/* Loading Spinner */}
+        {loading && (
+          <div className="mt-4 text-center">
+            <div className="loading-spinner"></div>
+          </div>
+        )}
       </div>
       
       {/* Merged Plate Table Display Area */}
