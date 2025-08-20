@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import StepperMotorControl from '../components/ManualControl'; 
 import RoutineBuilder from '../components/RoutineBuilder'; 
 import PiRoutineManager from '../components/PiRoutineManager'; 
@@ -7,129 +7,39 @@ import PiRoutineManager from '../components/PiRoutineManager';
 export default function Home() {
   const [activeTab, setActiveTab] = useState('routine');
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
-  const [allRoutines, setAllRoutines] = useState([]);
-  const [activeRoutines, setActiveRoutines] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-
   // The actual backend URL for the Raspberry Pi
-  const PI_BACKEND_URL = 'http://192.168.1.3:5000';
+  const PI_BACKEND_URL = 'http://192.168.1.9:5000';
+  const CONNECTION_TIMEOUT = 5000; // 5 seconds
 
-  /**
-   * Fetches routine data from the backend and updates the state.
-   */
-  const fetchRoutineData = async () => {
-    setIsLoading(true);
+  const checkConnectionAndFetchData = async () => {
     setConnectionStatus('Connecting...');
     try {
-      const response = await fetch(`${PI_BACKEND_URL}/routines`);
+      // Create a timeout promise that rejects after the specified time
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Connection timed out')), CONNECTION_TIMEOUT)
+      );
+
+      // Create a promise for the fetch request
+      const fetchPromise = fetch(`${PI_BACKEND_URL}`);
+
+      // Race the fetch and the timeout promises
+      const response = await Promise.race([fetchPromise, timeoutPromise]);
+      
       if (!response.ok) {
         throw new Error('Network response was not ok');
       }
       const data = await response.json();
-      
-      setAllRoutines(data.all_routines.sort((a, b) => a.creationDate - b.creationDate));
-      setActiveRoutines(data.active_routines);
+      console.log(data);
       setConnectionStatus('Connected');
     } catch (error) {
-      console.error('Failed to fetch routine data:', error);
+      console.error('Failed to connect to Raspberry Pi:', error);
       setConnectionStatus('Disconnected');
-      setAllRoutines([]);
-      setActiveRoutines([]);
-    } finally {
-      setIsLoading(false);
     }
   };
 
-  // useEffect to handle the initial fetch and subsequent refresh interval
   useEffect(() => {
-    fetchRoutineData();
-
-    // Set up an interval to refresh the data every 10 seconds
-    const intervalId = setInterval(fetchRoutineData, 10000); 
-    
-    // Clean up the interval on component unmount
-    return () => clearInterval(intervalId);
+    checkConnectionAndFetchData();
   }, []); // Empty dependency array ensures this runs once on mount
-
-  // Callback function to handle local updates to active routines
-  const handleLocalUpdateActiveRoutine = useCallback((originalName, day, time) => {
-    const updatedRoutines = activeRoutines.map((r) =>
-      r.originalName === originalName ? { ...r, day: parseInt(day, 10), time } : r
-    );
-    setActiveRoutines(updatedRoutines);
-  }, [activeRoutines]);
-
-  // Backend interaction functions
-  const handleSaveSchedule = async (routine) => {
-    try {
-      const response = await fetch(`${PI_BACKEND_URL}/schedule`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(routine),
-      });
-      if (!response.ok) throw new Error('Failed to save schedule');
-      await fetchRoutineData(); // Refresh data after saving
-    } catch (error) {
-      console.error('Error saving schedule:', error);
-      // In a real app, you would handle this gracefully (e.g., show an error message)
-    }
-  };
-
-  const handleRename = async (originalName, newName) => {
-    try {
-      const response = await fetch(`${PI_BACKEND_URL}/rename`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ originalName, newName }),
-      });
-      if (!response.ok) throw new Error('Failed to rename routine');
-      await fetchRoutineData(); // Refresh data
-    } catch (error) {
-      console.error('Error renaming routine:', error);
-    }
-  };
-
-  const handleDeleteRoutine = async (fileName) => {
-    try {
-      const response = await fetch(`${PI_BACKEND_URL}/delete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName }),
-      });
-      if (!response.ok) throw new Error('Failed to delete routine');
-      await fetchRoutineData(); // Refresh data
-    } catch (error) {
-      console.error('Error deleting routine:', error);
-    }
-  };
-
-  const handleMoveToActive = async (routineName) => {
-    try {
-      const response = await fetch(`${PI_BACKEND_URL}/activate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ routineName }),
-      });
-      if (!response.ok) throw new Error('Failed to move to active');
-      await fetchRoutineData();
-    } catch (error) {
-      console.error('Error moving routine to active:', error);
-    }
-  };
-
-  const handleMoveToInactive = async (routineName) => {
-    try {
-      const response = await fetch(`${PI_BACKEND_URL}/deactivate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ routineName }),
-      });
-      if (!response.ok) throw new Error('Failed to move to inactive');
-      await fetchRoutineData();
-    } catch (error) {
-      console.error('Error moving routine to inactive:', error);
-    }
-  };
 
   const getStatusIndicatorClass = () => {
     if (connectionStatus === 'Connected') {
@@ -368,19 +278,12 @@ export default function Home() {
         </div>
       </div>
 
-      {activeTab === 'routine' && <RoutineBuilder />}
-      {activeTab === 'manual' && <StepperMotorControl />}
+      {activeTab === 'routine' && <RoutineBuilder PI_BACKEND_URL={PI_BACKEND_URL} />}
+      {activeTab === 'manual' && <StepperMotorControl PI_BACKEND_URL={PI_BACKEND_URL} />}
       {activeTab === 'pi' && (
         <PiRoutineManager 
-          allRoutines={allRoutines}
-          activeRoutines={activeRoutines}
-          isLoading={isLoading}
-          onLocalUpdateActiveRoutine={handleLocalUpdateActiveRoutine}
-          onSaveSchedule={handleSaveSchedule}
-          onRename={handleRename}
-          onDeleteRoutine={handleDeleteRoutine}
-          onMoveToActive={handleMoveToActive}
-          onMoveToInactive={handleMoveToInactive}
+          connectionStatus={connectionStatus}
+          PI_BACKEND_URL={PI_BACKEND_URL}
         />
       )}
     </div>

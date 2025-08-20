@@ -1,454 +1,370 @@
 'use client';
-import { useState } from 'react';
 
-// This component is now a presentational component, receiving all data and functions as props.
-const PiRoutineManager = ({ 
-  allRoutines, 
-  activeRoutines, 
-  isLoading, 
-  onLocalUpdateActiveRoutine,
-  onSaveSchedule,
-  onRename,
-  onDeleteRoutine,
-  onMoveToActive,
-  onMoveToInactive
-}) => {
+import React, { useState, useEffect } from 'react';
+
+/**
+ * PiRoutineManager component to manage routines on the Raspberry Pi backend.
+ * It handles fetching, saving, renaming, and deleting routines via API calls.
+ * @param {object} props The component props.
+ * @param {string} props.PI_BACKEND_URL The URL of the Raspberry Pi backend.
+ * @param {string} props.connectionStatus The current connection status.
+ */
+const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
+  // State for routine data and UI elements
+  const [allRoutines, setAllRoutines] = useState([]);
+  const [activeRoutines, setActiveRoutines] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [selectedRoutine, setSelectedRoutine] = useState(null);
   const [selectedActiveRoutine, setSelectedActiveRoutine] = useState(null);
-
   const [isRenaming, setIsRenaming] = useState(false);
   const [newRoutineName, setNewRoutineName] = useState('');
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [fileToDelete, setFileToDelete] = useState(null);
-  
-  const handleRenameClick = (routine) => {
-    setIsRenaming(true);
-    setNewRoutineName(routine.name.replace('.txt', ''));
+
+  // --- Backend API Call Functions ---
+
+  /**
+   * Fetches all available routines from the backend.
+   * This now fetches the combined JSON data.
+   */
+  const fetchAllRoutines = async () => {
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/routines/all`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch all routines.');
+      }
+      const data = await response.json();
+      setAllRoutines(data.all_routines);
+      setActiveRoutines(data.active_routines);
+    } catch (error) {
+      console.error('Error fetching routines:', error);
+      setAllRoutines([]);
+      setActiveRoutines([]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleSaveRenameClick = (routine) => {
-    if (!newRoutineName || newRoutineName.endsWith('.txt')) {
-      alert("Invalid name. Must not be empty and should not end with '.txt'.");
-      return;
+  /**
+   * Moves a routine from inactive to active list on the backend.
+   * @param {string} filename The name of the routine file.
+   */
+  const moveToActive = async (filename) => {
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/routines/move-to-active`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename }),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to move routine to active list.');
+      }
+      await fetchAllRoutines();
+    } catch (error) {
+      console.error('Error moving routine to active:', error);
     }
-    // Call the parent's function to handle the backend request
-    onRename(routine.name, `${newRoutineName}.txt`);
-    setIsRenaming(false);
-    setNewRoutineName('');
-    setSelectedRoutine(null);
-    setSelectedActiveRoutine(null);
+  };
+
+  /**
+   * Moves a routine from active to inactive list on the backend.
+   * @param {string} filename The name of the routine file.
+   */
+  const moveToInactive = async (filename) => {
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/routines/move-to-inactive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename }),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to move routine to inactive list.');
+      }
+      await fetchAllRoutines();
+    } catch (error) {
+      console.error('Error moving routine to inactive:', error);
+    }
+  };
+
+  /**
+   * Handles saving a routine's schedule or renaming it.
+   * This is a single function for multiple save-related actions.
+   */
+  const handleSave = async (routine) => {
+    // If the rename input is visible, perform a rename
+    if (isRenaming) {
+      if (!newRoutineName || newRoutineName.endsWith('.json')) {
+        console.error("Invalid name. Must not be empty and should not end with '.json'.");
+        return;
+      }
+      try {
+        const response = await fetch(`${PI_BACKEND_URL}/routines/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ oldName: routine.name, newName: `${newRoutineName}.json` }),
+        });
+        if (!response.ok) {
+          throw new Error('Failed to rename routine.');
+        }
+        await fetchAllRoutines();
+      } catch (error) {
+        console.error('Error renaming routine:', error);
+      } finally {
+        setIsRenaming(false);
+        setNewRoutineName('');
+      }
+    } else {
+      // Otherwise, it's a schedule update for an active routine
+      try {
+        const response = await fetch(`${PI_BACKEND_URL}/routines/schedule`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: routine.name,
+            day: routine.day,
+            time: routine.time,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error('Failed to save routine schedule.');
+        }
+        await fetchAllRoutines();
+      } catch (error) {
+        console.error('Error saving routine schedule:', error);
+      }
+    }
   };
   
-  const handleDeleteRoutineClick = (routine) => {
-    setFileToDelete(routine);
-    setShowDeleteModal(true);
+  /**
+   * Handles the deletion of a routine file on the backend.
+   * @param {string} filename The name of the file to delete.
+   */
+  const handleDeleteFile = async (filename) => {
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/routines/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename }),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to delete routine file.');
+      }
+      await fetchAllRoutines();
+      setSelectedRoutine(null);
+      setSelectedActiveRoutine(null);
+    } catch (error) {
+      console.error('Error deleting routine file:', error);
+    }
   };
-  
-  const confirmDelete = () => {
+
+  // --- Effect Hooks for Data Loading ---
+  useEffect(() => {
+    if (PI_BACKEND_URL) {
+      fetchAllRoutines();
+    }
+  }, [PI_BACKEND_URL]);
+
+  // --- Local UI Handlers ---
+  const handleRenameClick = () => {
+    const routine = selectedRoutine || selectedActiveRoutine;
+    if (routine) {
+      setIsRenaming(true);
+      setNewRoutineName(routine.name.replace('.json', ''));
+    }
+  };
+
+  const handleDeleteRoutineClick = () => {
+    const routine = selectedRoutine || selectedActiveRoutine;
+    if (routine) {
+      setFileToDelete(routine.name);
+      setShowDeleteModal(true);
+    }
+  };
+
+  const confirmDelete = async () => {
     if (fileToDelete) {
-      // Call the parent's function to handle the backend request
-      onDeleteRoutine(fileToDelete.name);
+      await handleDeleteFile(fileToDelete);
       setShowDeleteModal(false);
       setFileToDelete(null);
-      setSelectedRoutine(null);
-      setSelectedActiveRoutine(null);
     }
   };
   
-  const handleMoveToActiveClick = () => {
-    if (selectedRoutine) {
-      onMoveToActive(selectedRoutine.name);
-      setSelectedRoutine(null);
-    }
-  };
-
-  const handleMoveToInactiveClick = () => {
-    if (selectedActiveRoutine) {
-      onMoveToInactive(selectedActiveRoutine.name);
-      setSelectedActiveRoutine(null);
-    }
+  const onLocalUpdateActiveRoutine = (filename, day, time) => {
+    setActiveRoutines(prev => prev.map(r => 
+      r.name === filename ? { ...r, day, time } : r
+    ));
   };
 
   return (
-    <div>
-      <style jsx>{`
-        .main-container {
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-          padding: 32px;
-          background-color: #f3f4f6;
-          min-height: 800px;
-          width: 900px;
-          margin: 0 auto;
-        }
-        .card-container {
-          width: 100%;
-        }
-        .main-title {
-          text-align: center;
-          font-size: 30px;
-          font-weight: 700;
-          margin-bottom: 16px;
-          color: #1f2937;
-        }
-        .columns-container {
-          display: flex;
-          flex-direction: row;
-          gap: 32px;
-        }
-        .column {
-          flex: 1;
-          padding: 16px;
-          background-color: #f9fafb;
-          border-radius: 8px;
-          box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-          border: 1px solid #e5e7eb;
-          min-width: 300px;
-        }
-        .column-title {
-          font-size: 20px;
-          font-weight: 700;
-          margin-bottom: 16px;
-          color: #1f2937;
-        }
-        .list {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          max-height: 384px;
-          overflow-y: auto;
-          padding-right: 8px;
-        }
-        .list-item-base {
-          padding: 12px;
-          border-radius: 8px;
-          border: 1px solid;
-          cursor: pointer;
-          transition: background-color 0.2s ease-in-out;
-        }
-        .list-item-selected {
-          background-color: #bfdbfe;
-          border-color: #3b82f6;
-        }
-        .list-item-unselected {
-          background-color: #ffffff;
-          border-color: #e5e7eb;
-        }
-        .list-item-unselected:hover {
-          background-color: #f3f4f6;
-        }
-        .list-item-content {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-        .list-item-text {
-          font-size: 14px;
-          font-weight: 500;
-          color: #1f2937;
-        }
-        .loading-text {
-          font-size: 14px;
-          color: #6b7280;
-          font-style: italic;
-        }
-        .transfer-buttons-container {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          gap: 16px;
-          margin: auto 0;
-        }
-        .transfer-button-base {
-          padding: 12px;
-          background-color: #3b82f6;
-          color: #ffffff;
-          border-radius: 9999px;
-          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-          transition: background-color 0.15s ease-in-out;
-        }
-        .transfer-button-base:hover:not(:disabled) {
-          background-color: #2563eb;
-        }
-        .transfer-button-base:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-        .input-container {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-        .input-number {
-          width: 48px;
-          text-align: center;
-          padding: 4px;
-          border: 1px solid;
-          border-radius: 4px;
-        }
-        .input-time {
-          width: 96px;
-          padding: 4px;
-          border: 1px solid;
-          border-radius: 4px;
-        }
-        .save-button {
-          margin-left: 8px;
-          padding: 4px 12px;
-          background-color: #10b981;
-          color: white;
-          border-radius: 6px;
-          font-size: 14px;
-          transition: background-color 0.15s ease-in-out;
-        }
-        .save-button:hover {
-          background-color: #059669;
-        }
-        .save-button:disabled {
-          background-color: #9ca3af;
-          cursor: not-allowed;
-        }
-        .action-buttons {
-          display: flex;
-          gap: 8px;
-          margin-top: 8px;
-          justify-content: flex-end;
-        }
-        .rename-button, .delete-button {
-          padding: 6px 12px;
-          font-size: 14px;
-          border-radius: 6px;
-          cursor: pointer;
-          transition: background-color 0.15s ease-in-out;
-        }
-        .rename-button {
-          background-color: #f59e0b;
-          color: white;
-        }
-        .rename-button:hover {
-          background-color: #d97706;
-        }
-        .delete-button {
-          background-color: #ef4444;
-          color: white;
-        }
-        .delete-button:hover {
-          background-color: #dc2626;
-        }
-        .modal {
-          position: fixed;
-          top: 0;
-          left: 0;
-          width: 100%;
-          height: 100%;
-          background-color: rgba(0, 0, 0, 0.5);
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          z-index: 1000;
-        }
-        .modal-content {
-          background: white;
-          padding: 24px;
-          border-radius: 8px;
-          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-          text-align: center;
-          width: 400px;
-        }
-        .modal-buttons {
-          margin-top: 16px;
-          display: flex;
-          justify-content: center;
-          gap: 16px;
-        }
-        .confirm-delete, .cancel-delete {
-          padding: 8px 16px;
-          font-size: 16px;
-          border-radius: 6px;
-          cursor: pointer;
-        }
-        .confirm-delete {
-          background-color: #ef4444;
-          color: white;
-        }
-        .cancel-delete {
-          background-color: #e5e7eb;
-          color: #4b5563;
-        }
-      `}</style>
-      <div className="main-container">
-        <div className="card-container">
-          <h1 className="main-title">Routine Manager</h1>
-          
-          <div className="columns-container">
-            {/* All Routines Column */}
-            <div className="column">
-              <h2 className="column-title">Routines</h2>
-              <ul className="list">
-                {isLoading ? (
-                  <p className="loading-text">Loading...</p>
-                ) : (
-                  allRoutines.map((routine) => (
-                    <li
-                      key={routine.name}
-                      className={`list-item-base ${selectedRoutine?.name === routine.name ? 'list-item-selected' : 'list-item-unselected'}`}
-                      onClick={() => {
-                        setSelectedRoutine(routine);
-                        setSelectedActiveRoutine(null);
-                      }}
-                    >
-                      <div className="list-item-content">
-                        <span className="list-item-text">{routine.name}</span>
-                      </div>
-                    </li>
-                  ))
-                )}
-              </ul>
-              {selectedRoutine && (
-                <div className="action-buttons">
-                  {isRenaming && selectedRoutine.name === selectedRoutine.name && (
-                    <div className="input-container">
-                      <input
-                        type="text"
-                        value={newRoutineName}
-                        onChange={(e) => setNewRoutineName(e.target.value)}
-                        className="input-number"
-                      />
-                      <button onClick={() => handleSaveRenameClick(selectedRoutine)} className="save-button">
-                        Save Name
-                      </button>
-                    </div>
-                  )}
-                  {!isRenaming && (
-                    <>
-                      <button onClick={() => handleRenameClick(selectedRoutine)} className="rename-button">
-                        Rename
-                      </button>
-                      <button onClick={() => handleDeleteRoutineClick(selectedRoutine)} className="delete-button">
-                        Delete
-                      </button>
-                    </>
-                  )}
+    <div className="flex flex-col gap-8 p-6 bg-gray-50 min-h-[800px] w-full max-w-4xl mx-auto rounded-xl shadow-2xl border-2 border-gray-200">
+      <h1 className="text-center text-3xl font-bold text-gray-800">Routine Manager</h1>
+      <div className="flex flex-col md:flex-row gap-8">
+        {/* All Routines Column */}
+        <div className="flex-1 p-6 bg-white rounded-xl shadow-md border border-gray-200 min-w-[300px]">
+          <h2 className="text-xl font-bold mb-4 text-gray-800">Routines</h2>
+          <ul className="flex flex-col gap-2 max-h-96 overflow-y-auto pr-2">
+            {isLoading ? (
+              <p className="text-sm text-gray-500 italic">Loading...</p>
+            ) : (
+              allRoutines.map((routine) => (
+                <li
+                  key={routine.name}
+                  className={`p-3 rounded-lg border cursor-pointer transition-colors duration-200 
+                    ${selectedRoutine?.name === routine.name ? 'bg-blue-200 border-blue-500' : 'bg-white border-gray-200 hover:bg-gray-100'}`}
+                  onClick={() => {
+                    setSelectedRoutine(routine);
+                    setSelectedActiveRoutine(null);
+                  }}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-800">{routine.name}</span>
+                  </div>
+                </li>
+              ))
+            )}
+          </ul>
+          {selectedRoutine && (
+            <div className="flex gap-2 mt-4 justify-end">
+              {isRenaming && selectedRoutine?.name === selectedRoutine?.name ? (
+                <div className="flex items-center gap-2 w-full">
+                  <input
+                    type="text"
+                    value={newRoutineName}
+                    onChange={(e) => setNewRoutineName(e.target.value)}
+                    className="w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="New routine name"
+                  />
+                  <button onClick={() => handleSave(selectedRoutine)} className="py-2 px-4 bg-emerald-500 text-white rounded-md text-sm hover:bg-emerald-600 transition-colors duration-150">
+                    Save
+                  </button>
                 </div>
+              ) : (
+                <>
+                  <button onClick={handleRenameClick} className="py-2 px-4 text-sm rounded-lg cursor-pointer bg-amber-500 text-white hover:bg-amber-600 transition-colors duration-150">
+                    Rename
+                  </button>
+                  <button onClick={handleDeleteRoutineClick} className="py-2 px-4 text-sm rounded-lg cursor-pointer bg-red-500 text-white hover:bg-red-600 transition-colors duration-150">
+                    Delete
+                  </button>
+                </>
               )}
             </div>
+          )}
+        </div>
 
-            {/* Transfer Buttons */}
-            <div className="transfer-buttons-container">
-              <button
-                onClick={handleMoveToActiveClick}
-                disabled={!selectedRoutine}
-                className="transfer-button-base"
-                title="Move to Active"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                </svg>
-              </button>
-              <button
-                onClick={handleMoveToInactiveClick}
-                disabled={!selectedActiveRoutine}
-                className="transfer-button-base"
-                title="Move to Available"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                </svg>
-              </button>
-            </div>
+        {/* Transfer Buttons */}
+        <div className="flex flex-row md:flex-col items-center justify-center gap-4 my-auto">
+          <button
+            onClick={() => moveToActive(selectedRoutine?.name)}
+            disabled={!selectedRoutine || isRenaming}
+            className="p-3 bg-blue-500 text-white rounded-full shadow-lg transition-colors duration-150 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Move to Active"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+            </svg>
+          </button>
+          <button
+            onClick={() => moveToInactive(selectedActiveRoutine?.name)}
+            disabled={!selectedActiveRoutine || isRenaming}
+            className="p-3 bg-blue-500 text-white rounded-full shadow-lg transition-colors duration-150 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Move to Available"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+          </button>
+        </div>
 
-            {/* Active Routines Column */}
-            <div className="column">
-              <h2 className="column-title">Active Routines</h2>
-              <ul className="list">
-                {isLoading ? (
-                  <p className="loading-text">Loading...</p>
-                ) : activeRoutines.length === 0 ? (
-                  <p className="loading-text">No active routines.</p>
-                ) : (
-                  activeRoutines.map((routine) => (
-                    <li
-                      key={routine.originalName}
-                      className={`list-item-base ${selectedActiveRoutine?.originalName === routine.originalName ? 'list-item-selected' : 'list-item-unselected'}`}
-                      onClick={() => {
-                        setSelectedActiveRoutine(routine);
-                        setSelectedRoutine(null);
-                      }}
-                    >
-                      <div className="list-item-content">
-                        <span className="list-item-text">{routine.name}</span>
-                        <div className="input-container">
-                          <input
-                            type="number"
-                            className="input-number"
-                            value={routine.day || 1}
-                            onChange={(e) => onLocalUpdateActiveRoutine(routine.originalName, e.target.value, routine.time)}
-                            min="1"
-                            max="7"
-                          />
-                          <input
-                            type="time"
-                            className="input-time"
-                            value={routine.time || '00:00'}
-                            onChange={(e) => onLocalUpdateActiveRoutine(routine.originalName, routine.day, e.target.value)}
-                          />
-                          <button
-                            onClick={() => onSaveSchedule(routine)}
-                            className="save-button"
-                          >
-                            Save
-                          </button>
-                        </div>
-                      </div>
-                    </li>
-                  ))
-                )}
-              </ul>
-              {selectedActiveRoutine && (
-                <div className="action-buttons">
-                  {isRenaming && selectedActiveRoutine.name === selectedActiveRoutine.name && (
-                    <div className="input-container">
+        {/* Active Routines Column */}
+        <div className="flex-1 p-6 bg-white rounded-xl shadow-md border border-gray-200 min-w-[300px]">
+          <h2 className="text-xl font-bold mb-4 text-gray-800">Active Routines</h2>
+          <ul className="flex flex-col gap-2 max-h-96 overflow-y-auto pr-2">
+            {isLoading ? (
+              <p className="text-sm text-gray-500 italic">Loading...</p>
+            ) : activeRoutines.length === 0 ? (
+              <p className="text-sm text-gray-500 italic">No active routines.</p>
+            ) : (
+              activeRoutines.map((routine) => (
+                <li
+                  key={routine.name}
+                  className={`p-3 rounded-lg border transition-colors duration-200
+                    ${selectedActiveRoutine?.name === routine.name ? 'bg-blue-200 border-blue-500' : 'bg-white border-gray-200 hover:bg-gray-100'}`}
+                  onClick={() => {
+                    setSelectedActiveRoutine(routine);
+                    setSelectedRoutine(null);
+                  }}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-800">{routine.name.replace('.json', '')}</span>
+                    <div className="flex items-center gap-2">
                       <input
-                        type="text"
-                        value={newRoutineName}
-                        onChange={(e) => setNewRoutineName(e.target.value)}
-                        className="input-number"
+                        type="number"
+                        className="w-12 text-center p-1 border border-gray-300 rounded-md"
+                        value={routine.day || ''}
+                        onChange={(e) => onLocalUpdateActiveRoutine(routine.name, e.target.value, routine.time)}
+                        min="1"
+                        max="7"
                       />
-                      <button onClick={() => handleSaveRenameClick(selectedActiveRoutine)} className="save-button">
-                        Save Name
+                      <input
+                        type="time"
+                        className="w-24 p-1 border border-gray-300 rounded-md"
+                        value={routine.time || ''}
+                        onChange={(e) => onLocalUpdateActiveRoutine(routine.name, routine.day, e.target.value)}
+                      />
+                      <button
+                        onClick={() => handleSave(routine)}
+                        className="py-1 px-3 bg-emerald-500 text-white rounded-lg text-sm hover:bg-emerald-600 transition-colors duration-150"
+                      >
+                        Save
                       </button>
                     </div>
-                  )}
-                  {!isRenaming && (
-                    <>
-                      <button onClick={() => handleRenameClick(selectedActiveRoutine)} className="rename-button">
-                        Rename
-                      </button>
-                      <button onClick={() => handleDeleteRoutineClick(selectedActiveRoutine)} className="delete-button">
-                        Delete
-                      </button>
-                    </>
-                  )}
+                  </div>
+                </li>
+              ))
+            )}
+          </ul>
+          {selectedActiveRoutine && (
+            <div className="flex gap-2 mt-4 justify-end">
+              {isRenaming && selectedActiveRoutine?.name === selectedActiveRoutine?.name ? (
+                <div className="flex items-center gap-2 w-full">
+                  <input
+                    type="text"
+                    value={newRoutineName}
+                    onChange={(e) => setNewRoutineName(e.target.value)}
+                    className="w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="New routine name"
+                  />
+                  <button onClick={() => handleSave(selectedActiveRoutine)} className="py-2 px-4 bg-emerald-500 text-white rounded-md text-sm hover:bg-emerald-600 transition-colors duration-150">
+                    Save
+                  </button>
                 </div>
+              ) : (
+                <>
+                  <button onClick={handleRenameClick} className="py-2 px-4 text-sm rounded-lg cursor-pointer bg-amber-500 text-white hover:bg-amber-600 transition-colors duration-150">
+                    Rename
+                  </button>
+                  <button onClick={handleDeleteRoutineClick} className="py-2 px-4 text-sm rounded-lg cursor-pointer bg-red-500 text-white hover:bg-red-600 transition-colors duration-150">
+                    Delete
+                  </button>
+                </>
               )}
             </div>
-          </div>
+          )}
         </div>
       </div>
       
       {/* Delete Confirmation Modal */}
       {showDeleteModal && (
-        <div className="modal">
-          <div className="modal-content">
+        <div className="fixed top-0 left-0 w-full h-full bg-black bg-opacity-50 flex justify-center items-center z-50">
+          <div className="bg-white p-6 rounded-lg shadow-lg text-center w-[400px]">
             <h3 className="text-lg font-bold">Confirm Deletion</h3>
-            <p className="mt-2">Are you sure you want to delete <span className="font-semibold">{fileToDelete?.name}</span>?</p>
-            <div className="modal-buttons">
-              <button onClick={confirmDelete} className="confirm-delete">
+            <p className="mt-2">Are you sure you want to delete <span className="font-semibold">{fileToDelete}</span>?</p>
+            <div className="mt-4 flex justify-center gap-4">
+              <button onClick={confirmDelete} className="py-2 px-4 text-base rounded-md cursor-pointer bg-red-500 text-white">
                 Confirm Delete
               </button>
-              <button onClick={() => setShowDeleteModal(false)} className="cancel-delete">
+              <button onClick={() => setShowDeleteModal(false)} className="py-2 px-4 text-base rounded-md cursor-pointer bg-gray-200 text-gray-700">
                 Cancel
               </button>
             </div>
