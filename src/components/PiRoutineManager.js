@@ -20,8 +20,23 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
   const [newRoutineName, setNewRoutineName] = useState('');
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [fileToDelete, setFileToDelete] = useState(null);
+  const [hasMounted, setHasMounted] = useState(false);
 
-  // --- Backend API Call Functions ---
+  // Helper function to convert seconds to a human-readable format
+  const formatTime = (totalSeconds) => {
+    const days = Math.floor(totalSeconds / (3600 * 24));
+    const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    let parts = [];
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    parts.push(`${seconds}s`);
+
+    return parts.join(' ');
+  };
 
   /**
    * Fetches all available routines from the backend.
@@ -35,8 +50,26 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
         throw new Error('Failed to fetch all routines.');
       }
       const data = await response.json();
-      setAllRoutines(data.all_routines);
-      setActiveRoutines(data.active_routines);
+      
+      // Function to parse content and extract runtime
+      const parseRoutineData = (routines) => {
+        return routines.map(routine => {
+          let totalRuntime = 0;
+          try {
+            const parsedContent = JSON.parse(routine.content);
+            if (Array.isArray(parsedContent) && typeof parsedContent[0] === 'number') {
+              totalRuntime = parsedContent[0];
+            }
+          } catch (e) {
+            console.error(`Error parsing routine content for ${routine.name}:`, e);
+          }
+          return { ...routine, totalRuntime };
+        });
+      };
+      
+      setAllRoutines(parseRoutineData(data.all_routines));
+      setActiveRoutines(parseRoutineData(data.active_routines));
+
     } catch (error) {
       console.error('Error fetching routines:', error);
       setAllRoutines([]);
@@ -158,11 +191,17 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
   };
 
   // --- Effect Hooks for Data Loading ---
+  // Use a state to track if the component has mounted on the client
   useEffect(() => {
-    if (PI_BACKEND_URL) {
+    setHasMounted(true);
+  }, []);
+
+  // Fetch routines only after the component has mounted
+  useEffect(() => {
+    if (hasMounted && PI_BACKEND_URL) {
       fetchAllRoutines();
     }
-  }, [PI_BACKEND_URL]);
+  }, [hasMounted, PI_BACKEND_URL]);
 
   // --- Local UI Handlers ---
   const handleRenameClick = () => {
@@ -195,55 +234,372 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     ));
   };
 
+  if (!hasMounted) {
+    return null; // Return nothing on the initial server render
+  }
+
   return (
-    <div className="flex flex-col gap-8 p-6 bg-gray-50 min-h-[800px] w-full max-w-4xl mx-auto rounded-xl shadow-2xl border-2 border-gray-200">
-      <h1 className="text-center text-3xl font-bold text-gray-800">Routine Manager</h1>
-      <div className="flex flex-col md:flex-row gap-8">
+    <div className="main-container">
+      <style>{`
+        .main-container {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem; /* corresponds to gap-8 */
+            padding: 1.5rem; /* corresponds to p-6 */
+            background-color: #f9fafb; /* corresponds to bg-gray-50 */
+            min-height: 800px; /* corresponds to min-h-[800px] */
+            width: 100%;
+            max-width: 64rem; /* corresponds to max-w-4xl */
+            margin: 0 auto;
+            border-radius: 0.75rem; /* corresponds to rounded-xl */
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); /* corresponds to shadow-2xl */
+            border: 2px solid #e5e7eb; /* corresponds to border-2 border-gray-200 */
+        }
+
+        .title {
+            text-align: center;
+            font-size: 1.875rem; /* corresponds to text-3xl */
+            font-weight: 700; /* corresponds to font-bold */
+            color: #1f2937; /* corresponds to text-gray-800 */
+        }
+
+        .columns-container {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem; /* corresponds to gap-8 */
+        }
+
+        @media (min-width: 768px) {
+            .columns-container {
+                flex-direction: row;
+            }
+        }
+
+        .column {
+            flex: 1;
+            padding: 1.5rem; /* corresponds to p-6 */
+            background-color: #ffffff; /* corresponds to bg-white */
+            border-radius: 0.75rem; /* corresponds to rounded-xl */
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); /* corresponds to shadow-md */
+            border: 1px solid #e5e7eb; /* corresponds to border border-gray-200 */
+            min-width: 300px; /* corresponds to min-w-[300px] */
+        }
+
+        .column-title {
+            font-size: 1.25rem; /* corresponds to text-xl */
+            font-weight: 700; /* corresponds to font-bold */
+            margin-bottom: 1rem; /* corresponds to mb-4 */
+            color: #1f2937; /* corresponds to text-gray-800 */
+        }
+
+        .routine-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem; /* corresponds to gap-2 */
+            max-height: 24rem; /* corresponds to max-h-96 */
+            overflow-y: auto;
+            padding-right: 0.5rem; /* corresponds to pr-2 */
+        }
+
+        .list-item {
+            padding: 0.75rem; /* corresponds to p-3 */
+            border-radius: 0.5rem; /* corresponds to rounded-lg */
+            border: 1px solid;
+            cursor: pointer;
+            transition-property: background-color;
+            transition-duration: 200ms;
+        }
+
+        .list-item-selected {
+            background-color: #bfdbfe; /* corresponds to bg-blue-200 */
+            border-color: #3b82f6; /* corresponds to border-blue-500 */
+        }
+
+        .list-item-default {
+            background-color: #ffffff; /* corresponds to bg-white */
+            border-color: #e5e7eb; /* corresponds to border-gray-200 */
+        }
+
+        .list-item-default:hover {
+            background-color: #f3f4f6; /* corresponds to hover:bg-gray-100 */
+        }
+
+        .list-item-content {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .routine-name {
+            font-size: 0.875rem; /* corresponds to text-sm */
+            font-weight: 500; /* corresponds to font-medium */
+            color: #1f2937; /* corresponds to text-gray-800 */
+        }
+
+        .routine-runtime {
+          font-size: 0.75rem;
+          color: #6b7280;
+          font-weight: 400;
+          margin-left: 0.5rem;
+        }
+
+        .italic-text {
+            font-size: 0.875rem; /* corresponds to text-sm */
+            color: #6b7280; /* corresponds to text-gray-500 */
+            font-style: italic;
+        }
+
+        .buttons-container {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            justify-content: flex-end;
+        }
+
+        .rename-input-container {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            width: 100%;
+        }
+
+        .rename-input {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #d1d5db; /* corresponds to border-gray-300 */
+            border-radius: 0.375rem; /* corresponds to rounded-md */
+            outline: none;
+        }
+
+        .rename-input:focus {
+            box-shadow: 0 0 0 2px #3b82f6; /* corresponds to focus:ring-2 focus:ring-blue-500 */
+        }
+
+        .save-button {
+            padding: 0.5rem 1rem; /* corresponds to py-2 px-4 */
+            background-color: #10b981; /* corresponds to bg-emerald-500 */
+            color: #ffffff;
+            border-radius: 0.375rem; /* corresponds to rounded-md */
+            font-size: 0.875rem; /* corresponds to text-sm */
+            transition-property: background-color;
+            transition-duration: 150ms;
+        }
+
+        .save-button:hover {
+            background-color: #059669; /* corresponds to hover:bg-emerald-600 */
+        }
+
+        .rename-button {
+            padding: 0.5rem 1rem; /* corresponds to py-2 px-4 */
+            font-size: 0.875rem; /* corresponds to text-sm */
+            border-radius: 0.5rem; /* corresponds to rounded-lg */
+            cursor: pointer;
+            background-color: #f59e0b; /* corresponds to bg-amber-500 */
+            color: #ffffff;
+            transition-property: background-color;
+            transition-duration: 150ms;
+        }
+
+        .rename-button:hover {
+            background-color: #d97706; /* corresponds to hover:bg-amber-600 */
+        }
+
+        .delete-button {
+            padding: 0.5rem 1rem; /* corresponds to py-2 px-4 */
+            font-size: 0.875rem; /* corresponds to text-sm */
+            border-radius: 0.5rem; /* corresponds to rounded-lg */
+            cursor: pointer;
+            background-color: #ef4444; /* corresponds to bg-red-500 */
+            color: #ffffff;
+            transition-property: background-color;
+            transition-duration: 150ms;
+        }
+
+        .delete-button:hover {
+            background-color: #dc2626; /* corresponds to hover:bg-red-600 */
+        }
+
+        .transfer-button-container {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            margin: auto 0;
+        }
+
+        @media (min-width: 768px) {
+            .transfer-button-container {
+                flex-direction: column;
+            }
+        }
+
+        .transfer-button {
+            padding: 0.75rem;
+            background-color: #3b82f6; /* corresponds to bg-blue-500 */
+            color: #ffffff;
+            border-radius: 9999px; /* corresponds to rounded-full */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); /* corresponds to shadow-lg */
+            transition-property: background-color;
+            transition-duration: 150ms;
+            font-size: 1.25rem; /* corresponds to text-xl */
+        }
+
+        .transfer-button:hover {
+            background-color: #2563eb; /* corresponds to hover:bg-blue-600 */
+        }
+
+        .transfer-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .input-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .input-number {
+            width: 3rem;
+            text-align: center;
+            padding: 0.25rem;
+            border: 1px solid #d1d5db; /* corresponds to border-gray-300 */
+            border-radius: 0.375rem; /* corresponds to rounded-md */
+        }
+
+        .input-time {
+            width: 6rem;
+            padding: 0.25rem;
+            border: 1px solid #d1d5db; /* corresponds to border-gray-300 */
+            border-radius: 0.375rem; /* corresponds to rounded-md */
+        }
+
+        .save-small-button {
+            padding: 0.25rem 0.75rem;
+            background-color: #10b981;
+            color: #ffffff;
+            border-radius: 0.5rem;
+            font-size: 0.875rem;
+            transition-property: background-color;
+            transition-duration: 150ms;
+        }
+
+        .save-small-button:hover {
+            background-color: #059669;
+        }
+
+        .modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 50;
+        }
+
+        .modal-content {
+            background-color: #ffffff;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            text-align: center;
+            width: 400px;
+        }
+
+        .modal-title {
+            font-size: 1.125rem;
+            font-weight: 700;
+        }
+
+        .modal-text {
+            margin-top: 0.5rem;
+        }
+
+        .modal-text .file-name {
+            font-weight: 600;
+        }
+
+        .modal-buttons {
+            margin-top: 1rem;
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+        }
+
+        .confirm-delete-button {
+            padding: 0.5rem 1rem;
+            font-size: 1rem;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            background-color: #ef4444;
+            color: #ffffff;
+        }
+
+        .cancel-button {
+            padding: 0.5rem 1rem;
+            font-size: 1rem;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            background-color: #e5e7eb;
+            color: #4b5563;
+        }
+      `}</style>
+      <h1 className="title">Routine Manager</h1>
+      <div className="columns-container">
         {/* All Routines Column */}
-        <div className="flex-1 p-6 bg-white rounded-xl shadow-md border border-gray-200 min-w-[300px]">
-          <h2 className="text-xl font-bold mb-4 text-gray-800">Routines</h2>
-          <ul className="flex flex-col gap-2 max-h-96 overflow-y-auto pr-2">
+        <div className="column">
+          <h2 className="column-title">Routines</h2>
+          <ul className="routine-list">
             {isLoading ? (
-              <p className="text-sm text-gray-500 italic">Loading...</p>
+              <p className="italic-text">Loading...</p>
             ) : (
               allRoutines.map((routine) => (
                 <li
                   key={routine.name}
-                  className={`p-3 rounded-lg border cursor-pointer transition-colors duration-200 
-                    ${selectedRoutine?.name === routine.name ? 'bg-blue-200 border-blue-500' : 'bg-white border-gray-200 hover:bg-gray-100'}`}
+                  className={`list-item ${selectedRoutine?.name === routine.name ? 'list-item-selected' : 'list-item-default'}`}
                   onClick={() => {
                     setSelectedRoutine(routine);
                     setSelectedActiveRoutine(null);
                   }}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium text-gray-800">{routine.name}</span>
+                  <div className="list-item-content">
+                    <span className="routine-name">{routine.name}</span>
+                    {routine.totalRuntime && (
+                      <span className="routine-runtime">
+                        ({formatTime(routine.totalRuntime)})
+                      </span>
+                    )}
                   </div>
                 </li>
               ))
             )}
           </ul>
           {selectedRoutine && (
-            <div className="flex gap-2 mt-4 justify-end">
+            <div className="buttons-container">
               {isRenaming && selectedRoutine?.name === selectedRoutine?.name ? (
-                <div className="flex items-center gap-2 w-full">
+                <div className="rename-input-container">
                   <input
                     type="text"
                     value={newRoutineName}
                     onChange={(e) => setNewRoutineName(e.target.value)}
-                    className="w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="rename-input"
                     placeholder="New routine name"
                   />
-                  <button onClick={() => handleSave(selectedRoutine)} className="py-2 px-4 bg-emerald-500 text-white rounded-md text-sm hover:bg-emerald-600 transition-colors duration-150">
+                  <button onClick={() => handleSave(selectedRoutine)} className="save-button">
                     Save
                   </button>
                 </div>
               ) : (
                 <>
-                  <button onClick={handleRenameClick} className="py-2 px-4 text-sm rounded-lg cursor-pointer bg-amber-500 text-white hover:bg-amber-600 transition-colors duration-150">
+                  <button onClick={handleRenameClick} className="rename-button">
                     Rename
                   </button>
-                  <button onClick={handleDeleteRoutineClick} className="py-2 px-4 text-sm rounded-lg cursor-pointer bg-red-500 text-white hover:bg-red-600 transition-colors duration-150">
+                  <button onClick={handleDeleteRoutineClick} className="delete-button">
                     Delete
                   </button>
                 </>
@@ -253,54 +609,54 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
         </div>
 
         {/* Transfer Buttons */}
-        <div className="flex flex-row md:flex-col items-center justify-center gap-4 my-auto">
+        <div className="transfer-button-container">
           <button
             onClick={() => moveToActive(selectedRoutine?.name)}
             disabled={!selectedRoutine || isRenaming}
-            className="p-3 bg-blue-500 text-white rounded-full shadow-lg transition-colors duration-150 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="transfer-button"
             title="Move to Active"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-            </svg>
+            →
           </button>
           <button
             onClick={() => moveToInactive(selectedActiveRoutine?.name)}
             disabled={!selectedActiveRoutine || isRenaming}
-            className="p-3 bg-blue-500 text-white rounded-full shadow-lg transition-colors duration-150 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="transfer-button"
             title="Move to Available"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
+            ←
           </button>
         </div>
 
         {/* Active Routines Column */}
-        <div className="flex-1 p-6 bg-white rounded-xl shadow-md border border-gray-200 min-w-[300px]">
-          <h2 className="text-xl font-bold mb-4 text-gray-800">Active Routines</h2>
-          <ul className="flex flex-col gap-2 max-h-96 overflow-y-auto pr-2">
+        <div className="column">
+          <h2 className="column-title">Active Routines</h2>
+          <ul className="routine-list">
             {isLoading ? (
-              <p className="text-sm text-gray-500 italic">Loading...</p>
+              <p className="italic-text">Loading...</p>
             ) : activeRoutines.length === 0 ? (
-              <p className="text-sm text-gray-500 italic">No active routines.</p>
+              <p className="italic-text">No active routines.</p>
             ) : (
               activeRoutines.map((routine) => (
                 <li
                   key={routine.name}
-                  className={`p-3 rounded-lg border transition-colors duration-200
-                    ${selectedActiveRoutine?.name === routine.name ? 'bg-blue-200 border-blue-500' : 'bg-white border-gray-200 hover:bg-gray-100'}`}
+                  className={`list-item ${selectedActiveRoutine?.name === routine.name ? 'list-item-selected' : 'list-item-default'}`}
                   onClick={() => {
                     setSelectedActiveRoutine(routine);
                     setSelectedRoutine(null);
                   }}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium text-gray-800">{routine.name.replace('.json', '')}</span>
-                    <div className="flex items-center gap-2">
+                  <div className="list-item-content">
+                    <span className="routine-name">{routine.name.replace('.json', '')}</span>
+                    {routine.totalRuntime && (
+                      <span className="routine-runtime">
+                        ({formatTime(routine.totalRuntime)})
+                      </span>
+                    )}
+                    <div className="input-group">
                       <input
                         type="number"
-                        className="w-12 text-center p-1 border border-gray-300 rounded-md"
+                        className="input-number"
                         value={routine.day || ''}
                         onChange={(e) => onLocalUpdateActiveRoutine(routine.name, e.target.value, routine.time)}
                         min="1"
@@ -308,13 +664,13 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
                       />
                       <input
                         type="time"
-                        className="w-24 p-1 border border-gray-300 rounded-md"
+                        className="input-time"
                         value={routine.time || ''}
                         onChange={(e) => onLocalUpdateActiveRoutine(routine.name, routine.day, e.target.value)}
                       />
                       <button
                         onClick={() => handleSave(routine)}
-                        className="py-1 px-3 bg-emerald-500 text-white rounded-lg text-sm hover:bg-emerald-600 transition-colors duration-150"
+                        className="save-small-button"
                       >
                         Save
                       </button>
@@ -325,26 +681,26 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
             )}
           </ul>
           {selectedActiveRoutine && (
-            <div className="flex gap-2 mt-4 justify-end">
+            <div className="buttons-container">
               {isRenaming && selectedActiveRoutine?.name === selectedActiveRoutine?.name ? (
-                <div className="flex items-center gap-2 w-full">
+                <div className="rename-input-container">
                   <input
                     type="text"
                     value={newRoutineName}
                     onChange={(e) => setNewRoutineName(e.target.value)}
-                    className="w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="rename-input"
                     placeholder="New routine name"
                   />
-                  <button onClick={() => handleSave(selectedActiveRoutine)} className="py-2 px-4 bg-emerald-500 text-white rounded-md text-sm hover:bg-emerald-600 transition-colors duration-150">
+                  <button onClick={() => handleSave(selectedActiveRoutine)} className="save-button">
                     Save
                   </button>
                 </div>
               ) : (
                 <>
-                  <button onClick={handleRenameClick} className="py-2 px-4 text-sm rounded-lg cursor-pointer bg-amber-500 text-white hover:bg-amber-600 transition-colors duration-150">
+                  <button onClick={handleRenameClick} className="rename-button">
                     Rename
                   </button>
-                  <button onClick={handleDeleteRoutineClick} className="py-2 px-4 text-sm rounded-lg cursor-pointer bg-red-500 text-white hover:bg-red-600 transition-colors duration-150">
+                  <button onClick={handleDeleteRoutineClick} className="delete-button">
                     Delete
                   </button>
                 </>
@@ -356,15 +712,15 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
       
       {/* Delete Confirmation Modal */}
       {showDeleteModal && (
-        <div className="fixed top-0 left-0 w-full h-full bg-black bg-opacity-50 flex justify-center items-center z-50">
-          <div className="bg-white p-6 rounded-lg shadow-lg text-center w-[400px]">
-            <h3 className="text-lg font-bold">Confirm Deletion</h3>
-            <p className="mt-2">Are you sure you want to delete <span className="font-semibold">{fileToDelete}</span>?</p>
-            <div className="mt-4 flex justify-center gap-4">
-              <button onClick={confirmDelete} className="py-2 px-4 text-base rounded-md cursor-pointer bg-red-500 text-white">
+        <div className="modal-backdrop">
+          <div className="modal-content">
+            <h3 className="modal-title">Confirm Deletion</h3>
+            <p className="modal-text">Are you sure you want to delete <span className="file-name">{fileToDelete}</span>?</p>
+            <div className="modal-buttons">
+              <button onClick={confirmDelete} className="confirm-delete-button">
                 Confirm Delete
               </button>
-              <button onClick={() => setShowDeleteModal(false)} className="py-2 px-4 text-base rounded-md cursor-pointer bg-gray-200 text-gray-700">
+              <button onClick={() => setShowDeleteModal(false)} className="cancel-button">
                 Cancel
               </button>
             </div>
