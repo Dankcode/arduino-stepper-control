@@ -101,7 +101,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
         const response = await fetch(`${PI_BACKEND_URL}/routines/rename`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ oldName: routine.name, newName: `${newRoutineName}.json` }),
+          body: JSON.stringify({ oldName: routine.name, newName: `${newRoutineName}.txt` }),
         });
         if (!response.ok) {
           throw new Error('Failed to rename routine.');
@@ -169,7 +169,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     const routine = selectedRoutine || selectedActiveRoutine;
     if (routine) {
       setIsRenaming(true);
-      setNewRoutineName(routine.name.replace('.json', ''));
+      setNewRoutineName(routine.name.replace('', ''));
     }
   };
 

@@ -1,0 +1,288 @@
+# A Python backend script using Flask to run on a Raspberry Pi.
+# It serves a list of available routine files and the currently active routine.
+# The server runs on localhost at port 5000.
+
+# Import necessary libraries.
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+import os
+import time
+import shutil
+# --- Configuration ---
+# Set the path to the folder where your routine files are stored.
+# IMPORTANT: This path is set for a standard Raspberry Pi setup.
+# Please update this path to match the actual location on your device if needed.
+ROUTINES_DIR = '/home/dank/routines/'
+ACTIVE_ROUTINES_DIR = '/home/dank/active_routines/'
+# Simulate an "active" routine.
+# In a real-world application, this would be determined by the state of your hardware
+# or a configuration file. For this example, we'll just hardcode a value.
+ACTIVE_ROUTINE_FILE = 'example_active.txt'
+
+# --- Flask App Initialization ---
+app = Flask(__name__)
+# Enable CORS for all domains. This is necessary for the frontend application
+# to be able to make requests to this backend.
+CORS(app)
+
+# --- Helper Functions ---
+def find_routine_file(filename):
+    """
+    Searches for a routine file in the standard and active routine directories.
+    Returns the full path if found, otherwise returns None.
+    """
+    # Check the standard routines directory first
+    standard_path = os.path.join(ROUTINES_DIR, filename)
+    if os.path.exists(standard_path):
+        return standard_path
+
+    # Check the active routines directory
+    active_path = os.path.join(ACTIVE_ROUTINES_DIR, filename)
+    if os.path.exists(active_path):
+        return active_path
+
+    return None
+
+def get_routine_name_from_active_filename(active_filename):
+    """
+    Strips the timestamp from a filename in the active routines directory.
+    Example: '2023-11-20-10-30-00-MyRoutine.txt' -> 'MyRoutine.txt'
+    """
+    # The expected format is YYYY-MM-DD-HH-MM-SS-OriginalName.txt
+    parts = active_filename.split('-')
+    if len(parts) > 6:
+        return '-'.join(parts[6:])
+    return active_filename
+
+# --- API Endpoints ---
+@app.route('/', methods=['GET'])
+def check_connection():
+    """
+    This new endpoint is a simple health check. It allows the frontend
+    to verify a connection to the backend by simply hitting the root URL.
+    """
+    return jsonify({"status": "Connected", "message": "Backend is running."}), 200
+
+@app.route("/upload_routine", methods=["POST"])
+def upload_routine():
+    """
+    Uploads a txt file to the routine folder
+    """
+    try:
+        # Check if a file was uploaded with the correct field name 'routine_file'
+        if 'routine_file' not in request.files:
+            return jsonify({"error": "No file part in the request"}), 400
+        
+        file = request.files['routine_file']
+        
+        # If the user does not select a file, the browser submits an
+        # empty file without a filename.
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+            
+        # Check if file has .txt extension
+        if not file.filename.endswith('.txt'):
+            return jsonify({"error": "Only .txt files are allowed"}), 400
+            
+        # Create the full path where the file will be saved
+        if not os.path.exists(ROUTINES_DIR):
+            os.makedirs(ROUTINES_DIR)
+            
+        file_path = os.path.join(ROUTINES_DIR, file.filename)
+            
+        # Check if file already exists
+        if os.path.exists(file_path):
+            return jsonify({"error": f"File '{file.filename}' already exists"}), 409
+        
+        # Save the file
+        file.save(file_path)
+        
+        return jsonify({"message": f"Routine '{file.filename}' uploaded successfully!"}), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Error uploading routine: {str(e)}"}), 500
+
+@app.route("/routines/all")
+def get_all_routines():
+    """
+    Returns a list of all routines (inactive and active).
+    """
+    try:
+        # Get all files from the routines directory
+        all_routines = os.listdir(ROUTINES_DIR)
+        
+        # Get all files from the active routines directory
+        active_routines = os.listdir(ACTIVE_ROUTINES_DIR)
+
+        # Structure the response for the frontend
+        formatted_active_routines = []
+        for filename in active_routines:
+            parts = filename.split('-', 3)
+            # Ensure the filename follows the convention before extracting data
+            if len(parts) == 4:
+                day, hour, minute = parts[0], parts[1], parts[2]
+                formatted_active_routines.append({
+                    "name": filename,
+                    "day": int(day),
+                    "time": f"{hour}:{minute}"
+                })
+            else:
+                # Handle files that do not follow the naming convention gracefully
+                formatted_active_routines.append({
+                    "name": filename,
+                    "day": None,
+                    "time": None
+                })
+
+        return jsonify({
+            "all_routines": [{"name": f} for f in all_routines],
+            "active_routines": formatted_active_routines
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
+@app.route("/routines/delete", methods=["POST"])
+def delete_routine():
+    """
+    Deletes a routine file from either folder.
+    Requires 'filename' in the JSON body.
+    """
+    data = request.json
+    filename = data.get("filename")
+    if not filename:
+        return jsonify({"error": "Filename not provided."}), 400
+
+    file_path = find_routine_file(filename)
+    if not file_path:
+        return jsonify({"error": "Routine not found."}), 404
+
+    try:
+        os.remove(file_path)
+        return jsonify({"message": f"Routine '{filename}' deleted successfully."}), 200
+    except OSError as e:
+        return jsonify({"error": f"Error deleting file: {e}"}), 500
+
+@app.route("/routines/rename", methods=["POST"])
+def rename_routine():
+    """
+    Renames a routine file in either folder.
+    Requires 'oldName' and 'newName' in the JSON body.
+    """
+    data = request.json
+    old_name = data.get("oldName")
+    new_name = data.get("newName")
+    if not old_name or not new_name:
+        return jsonify({"error": "Old or new name not provided."}), 400
+
+    old_path = find_routine_file(old_name)
+    if not old_path:
+        return jsonify({"error": "Routine not found."}), 404
+
+    # Determine the directory and construct the new path
+    new_path = os.path.join(os.path.dirname(old_path), new_name)
+
+    try:
+        shutil.move(old_path, new_path)
+        return jsonify({"message": f"Routine '{old_name}' renamed to '{new_name}' successfully."}), 200
+    except Exception as e:
+        return jsonify({"error": f"Error renaming file: {e}"}), 500
+
+@app.route("/routines/move-to-active", methods=["POST"])
+def move_to_active():
+    """
+    Moves a routine from the 'routines' folder to the 'active_routines' folder.
+    Renames the file to include day and time.
+    Requires 'filename', 'day', 'time' in the JSON body.
+    """
+    data = request.json
+    filename = data.get("filename")
+    day = data.get("day")
+    time = data.get("time")
+
+    if not all([filename, day, time]):
+        return jsonify({"error": "Missing data for moving to active."}), 400
+    
+    source_path = os.path.join(ROUTINES_DIR, filename)
+    if not os.path.exists(source_path):
+        return jsonify({"error": "Routine not found in the routines directory."}), 404
+    
+    # Format the time for the filename
+    hour, minute = time.split(':')
+    new_filename = f"{day}-{hour}-{minute}-{filename}"
+    destination_path = os.path.join(ACTIVE_ROUTINES_DIR, new_filename)
+    
+    try:
+        shutil.move(source_path, destination_path)
+        return jsonify({"message": f"Routine '{filename}' moved to active."}), 200
+    except Exception as e:
+        return jsonify({"error": f"Error moving routine: {e}"}), 500
+
+@app.route("/routines/move-to-inactive", methods=["POST"])
+def move_to_inactive():
+    """
+    Moves a routine from the 'active_routines' folder to the 'routines' folder.
+    Removes the time stamp from the filename.
+    Requires 'filename' in the JSON body.
+    """
+    data = request.json
+    filename = data.get("filename")
+    if not filename:
+        return jsonify({"error": "Filename not provided."}), 400
+
+    source_path = os.path.join(ACTIVE_ROUTINES_DIR, filename)
+    if not os.path.exists(source_path):
+        return jsonify({"error": "Routine not found in the active routines directory."}), 404
+        
+    original_name = get_routine_name_from_active_filename(filename)
+    destination_path = os.path.join(ROUTINES_DIR, original_name)
+    
+    try:
+        shutil.move(source_path, destination_path)
+        return jsonify({"message": f"Routine '{filename}' moved to inactive."}), 200
+    except Exception as e:
+        return jsonify({"error": f"Error moving routine: {e}"}), 500
+        
+@app.route("/routines/schedule", methods=["POST"])
+def save_schedule():
+    """
+    Updates the schedule for an active routine by renaming the file.
+    Requires 'filename', 'day', and 'time' in the JSON body.
+    """
+    data = request.json
+    old_filename = data.get("filename")
+    day = data.get("day")
+    time = data.get("time")
+
+    if not all([old_filename, day, time]):
+        return jsonify({"error": "Missing data for schedule update."}), 400
+
+    old_path = os.path.join(ACTIVE_ROUTINES_DIR, old_filename)
+    if not os.path.exists(old_path):
+        return jsonify({"error": "Routine not found in the active routines directory."}), 404
+    
+    # Extract the original name from the old filename
+    original_name = get_routine_name_from_active_filename(old_filename)
+    
+    # Create the new filename with the updated schedule
+    hour, minute = time.split(':')
+    new_filename = f"{day}-{hour}-{minute}-{original_name}"
+    new_path = os.path.join(ACTIVE_ROUTINES_DIR, new_filename)
+    
+    try:
+        shutil.move(old_path, new_path)
+        return jsonify({"message": "Schedule updated successfully."}), 200
+    except Exception as e:
+        return jsonify({"error": f"Error updating schedule: {e}"}), 500
+
+# --- Main entry point to run the application ---
+if __name__ == '__main__':
+    # Make sure the routine folder exists.
+    if not os.path.isdir(ROUTINES_DIR):
+        print(f"Warning: Routine folder '{ROUTINES_DIR}' not found.")
+        print("Please create the folder or update the ROUTINES_DIR path in the script.")
+    else:
+        # Run the Flask development server on the specified host and port.
+        print(f"Starting Flask server on http://0.0.0.0:5000/")
+        # Setting host='0.0.0.0' makes the server accessible on the network
+        # from other devices. Use host='127.0.0.1' for localhost only.
+        app.run(debug=True, host='0.0.0.0', port=5000)
