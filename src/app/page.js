@@ -70,7 +70,6 @@ export default function Home() {
 
         .main-wrapper {
           width: 100%;
-          max-width: 64rem;
           margin-left: auto;
           margin-right: auto;
           padding: 2rem;
@@ -78,7 +77,6 @@ export default function Home() {
           display: flex;
           flex-direction: column;
           align-items: center;
-          position: relative;
         }
 
         .main-title {
@@ -250,9 +248,6 @@ export default function Home() {
         <span className={getStatusIndicatorClass()} />
         {connectionStatus}
       </div>
-
-      <h1 className="main-title">Arduino Stepper Motor Control</h1>
-
       <div className="tab-section">
         <div className="tab-border-container">
           <nav className="tab-nav">

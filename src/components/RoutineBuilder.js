@@ -142,62 +142,74 @@ const RoutineBuilder = () => {
     setLoading(true);
     setMessage('Uploading routine...');
 
-    // Process all quadrant data into the required JSON format
-    const routineData = [];
-    
-    const processQuadrant = (quadrantDataArray, plateType) => {
-      if (plateType === 'none' || !quadrantDataArray) {
-        return [];
-      }
-      
-      const wells = [];
-      const { rows, cols } = getLayoutDimensions(plateType);
-      
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          const well = quadrantDataArray[r]?.[c];
-          
-          if (well) {
-            const wellId = `${String.fromCharCode(65 + r)}${c + 1}`;
-            wells.push({
-              well: wellId,
-              stepAmount: well.stepAmount,
-              delayBetweenStep: well.delayBetweenStep,
-              lightTime: well.lightTime,
-              exposureTime: well.exposureTime,
-              switchPlate: well.switchPlate,
-            });
-          }
-        }
-      }
-      return wells;
+    // A simple function to escape single quotes in a string for SQL
+    const escapeSQL = (value) => {
+      return String(value).replace(/'/g, "''");
     };
-    
+
+    // Array to hold the SQL INSERT statements
+    const sqlStatements = [];
+
     const quadrants = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
     let plateNumber = 1;
+
     quadrants.forEach(quadrant => {
       const layout = quadrantLayouts[quadrant];
       const quadrantDataArray = quadrantData[quadrant];
 
-      const quadrantProcessedData = processQuadrant(
-        quadrantDataArray,
-        layout
-      );
-      
-      const plateObject = {};
-      plateObject[`${plateNumber}`] = quadrantProcessedData;
-      routineData.push(plateObject);
+      if (layout !== 'none' && quadrantDataArray) {
+        const { rows, cols } = getLayoutDimensions(layout);
+
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const well = quadrantDataArray[r]?.[c];
+
+            if (well) {
+              const wellId = `${String.fromCharCode(65 + r)}${c + 1}`;
+
+              // Construct the SQL INSERT statement for each well
+              const statement = `
+                INSERT INTO well_data (
+                  filename,
+                  plateNumber,
+                  wellId,
+                  stepAmount,
+                  delayBetweenStep,
+                  lightTime,
+                  exposureTime,
+                  switchPlate
+                ) VALUES (
+                  '${escapeSQL(filename)}',
+                  ${plateNumber},
+                  '${escapeSQL(wellId)}',
+                  ${well.stepAmount || 0},
+                  ${well.delayBetweenStep || 0},
+                  ${well.lightTime || 0},
+                  ${well.exposureTime || 0},
+                  ${well.switchPlate ? 1 : 0}
+                );
+              `.trim();
+
+              sqlStatements.push(statement);
+            }
+          }
+        }
+      }
       plateNumber++;
     });
 
-    const routineString = JSON.stringify(routineData, null, 2);
-    const blob = new Blob([routineString], { type: 'text/plain' });
-    const file = new File([blob], `${filename}.txt`, { type: 'text/plain' });
-    
+    // Combine all statements into a single SQL script
+    const sqlScript = sqlStatements.join('\n');
+console.log(sqlScript)
+    // Create a Blob and a File object with the .sql extension
+    const blob = new Blob([sqlScript], { type: 'text/plain' });
+    const file = new File([blob], `${filename}.sql`, { type: 'text/plain' });
+
     const formData = new FormData();
     formData.append('routine_file', file);
-    
+
     try {
+      // NOTE: You must update the backend endpoint to accept and process SQL files
       const response = await fetch(`${PI_BACKEND_URL}/upload_routine`, {
         method: 'POST',
         body: formData,
