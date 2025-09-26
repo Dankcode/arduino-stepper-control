@@ -133,104 +133,86 @@ const RoutineBuilder = () => {
   };
   
   // Combines the logic for creating and uploading the routine to the backend.
-  const handleSaveAndUploadRoutine = async () => {
-    if (!filename) {
-      setMessage('Please enter a filename.');
-      return;
-    }
+const handleSaveAndUploadRoutine = async () => {
+  if (!filename) {
+    setMessage('Please enter a filename.');
+    return;
+  }
 
-    setLoading(true);
-    setMessage('Uploading routine...');
+  setLoading(true);
+  setMessage('Saving routine to SQL database...');
 
-    // A simple function to escape single quotes in a string for SQL
-    const escapeSQL = (value) => {
-      return String(value).replace(/'/g, "''");
-    };
+  // This will hold the structured data array for the 'well_data' table
+  const well_data_list = [];
+  const quadrants = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+  let plateNumber = 1;
 
-    // Array to hold the SQL INSERT statements
-    const sqlStatements = [];
+  // --- Step 1: Generate the flat well_data array (JSON payload structure) ---
+  quadrants.forEach(quadrant => {
+    const layout = quadrantLayouts[quadrant];
+    const quadrantDataArray = quadrantData[quadrant];
 
-    const quadrants = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
-    let plateNumber = 1;
+    if (layout !== 'none' && quadrantDataArray) {
+      // NOTE: getLayoutDimensions, quadrantLayouts, quadrantData must be defined outside this function
+      const { rows, cols } = getLayoutDimensions(layout); 
 
-    quadrants.forEach(quadrant => {
-      const layout = quadrantLayouts[quadrant];
-      const quadrantDataArray = quadrantData[quadrant];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const well = quadrantDataArray[r]?.[c];
 
-      if (layout !== 'none' && quadrantDataArray) {
-        const { rows, cols } = getLayoutDimensions(layout);
+          if (well) {
+            const wellId = `${String.fromCharCode(65 + r)}${c + 1}`;
 
-        for (let r = 0; r < rows; r++) {
-          for (let c = 0; c < cols; c++) {
-            const well = quadrantDataArray[r]?.[c];
-
-            if (well) {
-              const wellId = `${String.fromCharCode(65 + r)}${c + 1}`;
-
-              // Construct the SQL INSERT statement for each well
-              const statement = `
-                INSERT INTO well_data (
-                  filename,
-                  plateNumber,
-                  wellId,
-                  stepAmount,
-                  delayBetweenStep,
-                  lightTime,
-                  exposureTime,
-                  switchPlate
-                ) VALUES (
-                  '${escapeSQL(filename)}',
-                  ${plateNumber},
-                  '${escapeSQL(wellId)}',
-                  ${well.stepAmount || 0},
-                  ${well.delayBetweenStep || 0},
-                  ${well.lightTime || 0},
-                  ${well.exposureTime || 0},
-                  ${well.switchPlate ? 1 : 0}
-                );
-              `.trim();
-
-              sqlStatements.push(statement);
-            }
+            // Construct the JSON object for the well data
+            // The filename link is implicit in the final JSON body
+            well_data_list.push({
+              plateNumber: plateNumber,
+              wellId: wellId,
+              stepAmount: well.stepAmount || 0,
+              delayBetweenStep: well.delayBetweenStep || 0,
+              lightTime: well.lightTime || 0,
+              exposureTime: well.exposureTime || 0,
+              // Convert boolean switchPlate to integer (1 or 0) for the SQL database
+              switchPlate: well.switchPlate ? 1 : 0 
+            });
           }
         }
       }
-      plateNumber++;
+    }
+    plateNumber++;
+  });
+
+  console.log('Generated Well Data List:', well_data_list);
+
+  // --- Step 2: Send the Routine Data to the Dedicated SQL Saving Endpoint ---
+  try {
+    // The backend now expects the filename (the parent key) and the array of well_data (the children)
+    const response = await fetch(`${PI_BACKEND_URL}/save_routine_sql`, { 
+      method: 'POST',
+      headers: { 
+          'Content-Type': 'application/json' 
+      },
+      body: JSON.stringify({
+          filename: filename,          // Parent Key
+          well_data: well_data_list    // Child Data
+      }),
     });
 
-    // Combine all statements into a single SQL script
-    const sqlScript = sqlStatements.join('\n');
-console.log(sqlScript)
-    // Create a Blob and a File object with the .sql extension
-    const blob = new Blob([sqlScript], { type: 'text/plain' });
-    const file = new File([blob], `${filename}.sql`, { type: 'text/plain' });
-
-    const formData = new FormData();
-    formData.append('routine_file', file);
-
-    try {
-      // NOTE: You must update the backend endpoint to accept and process SQL files
-      const response = await fetch(`${PI_BACKEND_URL}/upload_routine`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        setMessage(result.message || 'Routine uploaded successfully!');
-      } else {
-        const errorText = await response.text();
-        setMessage(`Error: ${errorText}`);
-        console.error('Upload failed:', response.status, errorText);
-      }
-    } catch (error) {
-      setMessage('Failed to upload routine. Check the backend connection.');
-      console.error('Network error during upload:', error);
-    } finally {
-      setLoading(false);
+    if (response.ok) {
+      const result = await response.json();
+      setMessage(result.message || 'Routine saved and replaced successfully!');
+    } else {
+      const errorResponse = await response.json().catch(() => ({ error: 'Unknown server error' }));
+      setMessage(`Error: ${errorResponse.error || response.statusText}`);
+      console.error('Save failed:', response.status, errorResponse);
     }
-  };
-
+  } catch (error) {
+    setMessage('Failed to save routine. Check the backend connection.');
+    console.error('Network error during save:', error);
+  } finally {
+    setLoading(false);
+  }
+};
   return (
     <div className="routine-builder-container">
       <style>{`

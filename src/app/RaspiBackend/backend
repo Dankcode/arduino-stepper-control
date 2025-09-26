@@ -1,14 +1,10 @@
-# A Python backend script using Flask to run on a Raspberry Pi.
-# It serves a list of available routine files and the currently active routine.
-# The server runs on localhost at port 5000.
-
-# Import necessary libraries.
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
 import time
 import shutil
 import sqlite3 # Import the sqlite3 library
+from datetime import datetime, timedelta 
 
 # --- Configuration ---
 # Set the path to the folder where your routine files are stored.
@@ -30,27 +26,32 @@ app = Flask(__name__)
 # to be able to make requests to this backend.
 CORS(app)
 
-# --- Database Helper Functions ---
-
 def get_db_connection():
     """Establishes a connection to the SQLite database."""
     conn = sqlite3.connect(DATABASE_FILE)
-    # Set row_factory to sqlite3.Row to allow accessing columns by name
+    # Allows column access by name (e.g., row['filename'])
     conn.row_factory = sqlite3.Row 
     return conn
 
 def init_db():
-    """Creates the 'well_data' table if it doesn't exist."""
-    print("Initializing database...")
+    """Creates the necessary tables if they don't exist, establishing parent-child relationships."""
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # SQL to create the table based on the data structure uploaded from the frontend
-    # Note: 'switchPlate' is stored as INTEGER (0 or 1 for BOOLEAN)
+    # 1. PARENT Table: routines (New)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS routines (
+            filename TEXT PRIMARY KEY,       -- Parent key for the routine
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    
+    # 2. CHILD Table: well_data (Routine Steps)
+    # well_data is a CHILD of routines, using ON DELETE CASCADE
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS well_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
+            filename TEXT NOT NULL,         
             plateNumber INTEGER NOT NULL,
             wellId TEXT NOT NULL,
             stepAmount INTEGER,
@@ -58,22 +59,55 @@ def init_db():
             lightTime INTEGER,
             exposureTime INTEGER,
             switchPlate INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            -- Foreign Key constraint
+            FOREIGN KEY (filename) REFERENCES routines(filename) ON DELETE CASCADE,
+            UNIQUE(filename, plateNumber, wellId)
         );
     """)
-    # Create an index for faster lookups based on filename, which will be frequent
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_filename ON well_data (filename);")
+    
+    # 3. CHILD Table: routine_schedule (Active Status/Schedule)
+    # routine_schedule is a CHILD of routines, using ON DELETE CASCADE
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS routine_schedule (
+            filename TEXT PRIMARY KEY,       
+            start_time TEXT,                 -- HH:MM 
+            schedule_day INTEGER,            -- Day of the week (1-7, 1=Mon, 7=Sun)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            -- Foreign Key constraint
+            FOREIGN KEY (filename) REFERENCES routines(filename) ON DELETE CASCADE
+        );
+    """)
+    
     conn.commit()
     conn.close()
-    print("Database initialization complete.")
     
+def _time_to_minutes(schedule_day, start_time):
+    # ... (Scheduling helper function, no change) ...
+    try: 
+        if schedule_day is None or start_time is None:
+            return None
+        day_minutes = (int(schedule_day) - 1) * 24 * 60 
+        h, m = map(int, start_time.split(':'))
+        time_minutes = h * 60 + m 
+        return day_minutes + time_minutes
+    except:
+        return None
+
+def _minutes_to_time(total_minutes):
+    # ... (Scheduling helper function, no change) ...
+    WEEK_MINUTES = 7 * 24 * 60
+    norm_minutes = total_minutes % WEEK_MINUTES 
+    day = int(norm_minutes // (24 * 60)) + 1
+    remaining_minutes = norm_minutes % (24 * 60)
+    hour = int(remaining_minutes // 60)
+    minute = int(remaining_minutes % 60)
+    return day, f"{hour:02d}:{minute:02d}"
+
 def calculate_routine_runtime(routine_name):
-    """
-    Calculates the total runtime in seconds for a routine based on its well data.
-    Formula: SUM( (stepAmount * (delayBetweenStep + lightTime + exposureTime)) )
-    """
+    """Calculates the total runtime in seconds from well_data."""
     conn = get_db_connection()
-    # The filename in the DB is the base name (no .sql)
+    # Still query well_data, which holds the step information
     cursor = conn.execute("""
         SELECT 
             SUM(
@@ -82,15 +116,48 @@ def calculate_routine_runtime(routine_name):
         FROM well_data
         WHERE filename = ?
     """, (routine_name,))
-    
     result = cursor.fetchone()
     conn.close()
-    
-    # Returns the calculated runtime or 0 if NULL/no data
     return result['total_runtime'] if result and result['total_runtime'] is not None else 0
 
-# --- Helper Functions ---
-# (Existing helper functions remain the same)
+def get_next_available_time():
+    """Calculates the earliest available start time for a new routine."""
+    # ... (Scheduling logic, no change) ...
+    conn = get_db_connection()
+    scheduled_routines = conn.execute("SELECT filename, start_time, schedule_day FROM routine_schedule").fetchall()
+    conn.close()
+
+    scheduled_data = []
+    for row in scheduled_routines:
+        start_minutes = _time_to_minutes(row['schedule_day'], row['start_time'])
+        if start_minutes is not None:
+            runtime = calculate_routine_runtime(row['filename'])
+            runtime_minutes = (runtime + 59) // 60 
+            
+            scheduled_data.append({
+                'start_minutes': start_minutes,
+                'end_minutes': start_minutes + runtime_minutes,
+                'filename': row['filename']
+            })
+
+    scheduled_data.sort(key=lambda x: x['start_minutes'])
+    
+    now = datetime.now()
+    current_day = now.weekday() + 1 
+    current_time = now.strftime('%H:%M')
+    current_minutes = _time_to_minutes(current_day, current_time)
+
+    next_available_minutes = current_minutes
+    
+    for routine in scheduled_data:
+        if routine['end_minutes'] > next_available_minutes:
+            next_available_minutes = routine['end_minutes']
+
+    if not scheduled_data and next_available_minutes == current_minutes:
+         return current_day, current_time
+        
+    return _minutes_to_time(next_available_minutes)
+
 def find_routine_file(filename):
     # ... (existing code)
     pass # Placeholder to indicate existing functions are not repeated
@@ -99,8 +166,6 @@ def get_routine_name_from_active_filename(active_filename):
     # ... (existing code)
     pass # Placeholder to indicate existing functions are not repeated
 
-
-# --- API Endpoints ---
 @app.route('/', methods=['GET'])
 def check_connection():
     """
@@ -109,214 +174,296 @@ def check_connection():
     """
     return jsonify({"status": "Connected", "message": "Backend is running."}), 200
 
-# MODIFIED ENDPOINT: Now handles the uploaded SQL script and executes it
-@app.route("/upload_routine", methods=["POST"])
-def upload_routine():
+@app.route("/save_routine_sql", methods=["POST"])
+def save_routine_sql():
     """
-    Accepts an uploaded SQL file and executes the INSERT statements within
-    it to store the routine state in the SQLite database.
+    Saves a new routine by inserting the filename into the PARENT 'routines' table 
+    and then the well data into the 'well_data' CHILD table.
     """
+    data = request.json
+    filename = data.get("filename")
+    well_data_list = data.get("well_data", [])
+
+    if not filename or not well_data_list:
+        return jsonify({"error": "Filename or well data missing."}), 400
+
+    conn = get_db_connection()
     try:
-        # Check if a file was uploaded with the correct field name 'routine_file'
-        if 'routine_file' not in request.files:
-            return jsonify({"error": "No file part in the request"}), 400
+        conn.execute('BEGIN TRANSACTION;')
         
-        file = request.files['routine_file']
+        # 1. Insert/Replace into PARENT table: routines
+        conn.execute("INSERT OR REPLACE INTO routines (filename) VALUES (?)", (filename,))
+
+        # 2. Clear existing well_data for this routine to ensure a clean save/overwrite
+        conn.execute("DELETE FROM well_data WHERE filename = ?", (filename,))
         
-        # If the user does not select a file, the browser submits an
-        # empty file without a filename.
-        if file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
-            
-        # Check if file has .sql extension (as per frontend change)
-        if not file.filename.endswith('.sql'):
-            return jsonify({"error": "Only .sql files are allowed for routine upload"}), 400
-            
-        # 1. Read the content of the uploaded SQL file
-        # The file is a FileStorage object, so we read its contents.
-        sql_script = file.read().decode('utf-8')
-        
-        # We assume the frontend has ensured the filename is clean and contains 
-        # the routine name (e.g., 'MyRoutine.sql').
-        routine_name = file.filename.replace('.sql', '')
+        # 3. Insert into CHILD table: well_data
+        insert_data = [
+            (
+                filename, d['plateNumber'], d['wellId'], d['stepAmount'], 
+                d['delayBetweenStep'], d['lightTime'], d['exposureTime'], d['switchPlate']
+            ) for d in well_data_list
+        ]
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        conn.executemany("""
+            INSERT INTO well_data (
+                filename, plateNumber, wellId, stepAmount, delayBetweenStep, 
+                lightTime, exposureTime, switchPlate
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, insert_data)
 
-        # 2. Delete existing routine data for the same filename to ensure an 'overwrite'
-        # This prevents duplicate well entries on re-upload of the same filename.
-        cursor.execute("DELETE FROM well_data WHERE filename = ?", (routine_name,))
-
-        # 3. Execute the SQL script containing the INSERT statements
-        # executemany or executescript is used for multiple statements
-        # We use executescript as the frontend compiled a complete script
-        cursor.executescript(sql_script)
-
-        # 4. Commit the transaction
         conn.commit()
-        conn.close()
+        return jsonify({"message": f"Routine '{filename}' saved successfully."}), 200
         
-        return jsonify({"message": f"Routine '{routine_name}' data successfully stored in SQLite."}), 200
-        
-    except sqlite3.Error as e:
-        # Handle SQLite-specific errors (e.g., malformed SQL)
-        conn.close()
-        return jsonify({"error": f"Database Error: {str(e)}"}), 500
-        
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        return jsonify({"error": f"Integrity error: {e}"}), 400
     except Exception as e:
-        # Handle general errors (e.g., file reading, network)
-        return jsonify({"error": f"Error processing routine: {str(e)}"}), 500
+        conn.rollback()
+        return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+    finally:
+        conn.close()
 
-# IMPORTANT: All other endpoints like get_all_routines, delete_routine, etc.
-# will also need to be updated to query the database instead of accessing the filesystem.
-# I'll include a placeholder for 'get_all_routines' as an example, but focus the primary edit
-# on 'upload_routine' as requested.
 
 @app.route("/routines/all")
 def get_all_routines():
     """
-    Returns a list of all unique routine names from the database
-    and active routines from the filesystem.
+    Returns a list of all routines (from PARENT 'routines' table) and active routines 
+    (from CHILD 'routine_schedule' table).
     """
     try:
         conn = get_db_connection()
-        # Retrieve all unique filenames (routines) from the well_data table
-        unique_routines = conn.execute("SELECT DISTINCT filename FROM well_data ORDER BY filename;").fetchall()
-        conn.close()
-
-        all_routines = [{"name": f['filename'] + '.sql'} for f in unique_routines]
         
-        # Get all files from the active routines directory (unchanged for scheduling logic)
-        active_routines = os.listdir(ACTIVE_ROUTINES_DIR)
+        # 1. Get ALL routines from the PARENT table
+        all_routines = conn.execute("SELECT filename FROM routines ORDER BY filename;").fetchall()
+        
+        # 2. Get ACTIVE routine details from routine_schedule
+        active_schedule_data = conn.execute("SELECT * FROM routine_schedule;").fetchall()
+    
+        active_map = {}
+        for row in active_schedule_data:
+            start_minutes = _time_to_minutes(row['schedule_day'], row['start_time'])
+            active_map[row['filename']] = {
+                'day': row['schedule_day'],
+                'time': row['start_time'],
+                'start_minutes': start_minutes,
+            }
+            
+        all_routines_list = []
+        active_routines_list = []
+        for row in all_routines:
+            routine_base_name = row['filename']
+            runtime = calculate_routine_runtime(routine_base_name)
+     
+            if routine_base_name in active_map:
+                active_data = active_map[routine_base_name]
+                active_routines_list.append({
+                    "name": routine_base_name,
+                    "day": active_data.get('day'),
+                    "time": active_data.get('time'),
+                    "totalRuntime": runtime,
+                    "start_minutes": active_data.get('start_minutes')
+                })
+            else:
+                all_routines_list.append({
+                    "name": routine_base_name + '.sql', 
+                    "totalRuntime": runtime
+                })
 
-        # Structure the response for the frontend (simplified for this example)
-        formatted_active_routines = []
-        for filename in active_routines:
-            # Assuming active routine files are still in the old format for simplicity here
-            # and that actual runtime is still using file management for scheduling.
-            formatted_active_routines.append({"name": filename, "day": None, "time": None})
-
+        conn.close()
+        
+        # 3. Sort the active routines by their start_minutes
+        active_routines_list = sorted([
+            r for r in active_routines_list if r['start_minutes'] is not None
+        ], key=lambda x: x['start_minutes'])
+        
+        for r in active_routines_list:
+            del r['start_minutes']
+        
         return jsonify({
-            "all_routines": all_routines,
-            "active_routines": formatted_active_routines
+            "all_routines": all_routines_list,
+            "active_routines": active_routines_list
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/routines/rename", methods=["POST"])
+def rename_routine():
+    """
+    Renames the routine in all three tables: routines (parent), well_data, and routine_schedule (children).
+    """
+    data = request.json
+    old_name = data.get("oldName")
+    new_name = data.get("newName")
     
-@app.route("/routines/data/<string:routine_name>", methods=["GET"])
-def get_routine_data(routine_name):
-    """
-    Fetches all well_data records for a given routine name (for the Edit function).
-    The routine_name should be the base name (no .sql extension).
-    """
-    try:
-        conn = get_db_connection()
-        cursor = conn.execute("SELECT * FROM well_data WHERE filename = ?", (routine_name,))
-        data = [dict(row) for row in cursor.fetchall()]
-        conn.close()
+    if not old_name or not new_name:
+        return jsonify({"error": "Old name or new name not provided."}), 400
         
-        if not data:
-            return jsonify({"error": f"No data found for routine '{routine_name}'"}), 404
+    if old_name == new_name:
+        return jsonify({"message": "Routine name did not change."}), 200
+
+    conn = get_db_connection()
+    try:
+        conn.execute('BEGIN TRANSACTION;') 
+        
+        # Check if the old routine exists in the PARENT table
+        exists = conn.execute("SELECT 1 FROM routines WHERE filename = ?", (old_name,)).fetchone()
+        if not exists:
+            conn.rollback()
+            return jsonify({"error": f"Routine '{old_name}' not found in the database."}), 404
             
-        return jsonify(data), 200
+        # Due to SQLite not supporting cascading updates on PRIMARY KEY foreign keys:
+        # 1. Update the filename in CHILD tables first
+        conn.execute("UPDATE well_data SET filename = ? WHERE filename = ?", (new_name, old_name))
+        conn.execute("UPDATE routine_schedule SET filename = ? WHERE filename = ?", (new_name, old_name))
+        
+        # 2. Delete the old filename entry from PARENT table
+        conn.execute("DELETE FROM routines WHERE filename = ?", (old_name,))
+        
+        # 3. Insert the new filename entry into PARENT table
+        conn.execute("INSERT INTO routines (filename) VALUES (?)", (new_name,))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"message": f"Routine '{old_name}' renamed to '{new_name}' successfully."}), 200
+        
+    except sqlite3.Error as e:
+        conn.rollback()
+        conn.close() 
+        return jsonify({"error": f"Database error during renaming: {e}"}), 500
     except Exception as e:
-        return jsonify({"error": f"Error fetching routine data: {str(e)}"}), 500
+        conn.close()
+        return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
 
 @app.route("/routines/delete", methods=["POST"])
 def delete_routine():
     """
-    Deletes a routine, either from the SQL database (inactive) or the filesystem (active).
-    Requires 'filename' in the JSON body.
+    Deletes a routine from the PARENT 'routines' table.
+    The ON DELETE CASCADE foreign key constraint handles the deletion from well_data and routine_schedule.
     """
     data = request.json
     filename = data.get("filename")
     if not filename:
         return jsonify({"error": "Filename not provided."}), 400
 
-    # 1. Check for Active Routine (Filesystem)
-    file_path = find_routine_file(filename)
-    if file_path and file_path.startswith(ACTIVE_ROUTINES_DIR):
-        try:
-            os.remove(file_path)
-            return jsonify({"message": f"Active routine file '{filename}' deleted successfully."}), 200
-        except OSError as e:
-            return jsonify({"error": f"Error deleting file: {e}"}), 500
-
-    # 2. Delete from SQL Database (Inactive Routine)
-    # The frontend passes the base name for inactive routines
-    routine_name_base = filename
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM well_data WHERE filename = ?", (routine_name_base,))
+        
+        # Delete from the PARENT table
+        cursor.execute("DELETE FROM routines WHERE filename = ?", (filename,))
         
         if cursor.rowcount == 0:
             conn.close()
-            return jsonify({"error": "Routine not found in database or filesystem."}), 404
-
-        conn.commit()
-        conn.close()
-        return jsonify({"message": f"Routine '{routine_name_base}' deleted successfully from database."}), 200
-    except sqlite3.Error as e:
-        conn.close()
-        return jsonify({"error": f"Database error during deletion: {e}"}), 500
-
-
-@app.route("/routines/rename", methods=["POST"])
-def rename_routine():
-    """
-    Renames a routine. If inactive, updates the filename in the SQL database.
-    If active, renames the file on the filesystem.
-    Requires 'oldName' and 'newName' in the JSON body (both should be base names 
-    for inactive routines, or full file names for active).
-    """
-    data = request.json
-    old_name = data.get("oldName")
-    new_name = data.get("newName")
-    if not old_name or not new_name:
-        return jsonify({"error": "Old or new name not provided."}), 400
-        
-    # 1. Check for Active Routine (Filesystem)
-    # The frontend sends the full timestamped name for active routines
-    old_path_active = find_routine_file(old_name)
-    if old_path_active and old_path_active.startswith(ACTIVE_ROUTINES_DIR):
-        # Extract the original name from the timestamped name
-        original_base_name = get_routine_name_from_active_filename(old_name).replace('.txt', '')
-        
-        # Re-construct the new filename with the *original* base name's extension (.txt)
-        new_active_filename = old_name.replace(original_base_name, new_name)
-
-        new_path_active = os.path.join(ACTIVE_ROUTINES_DIR, new_active_filename)
-
-        try:
-            shutil.move(old_path_active, new_path_active)
-            return jsonify({"message": f"Active routine '{old_name}' renamed to '{new_active_filename}' successfully."}), 200
-        except Exception as e:
-            return jsonify({"error": f"Error renaming active file: {e}"}), 500
-
-
-    # 2. Rename in SQL Database (Inactive Routine)
-    # The frontend sends the base name (no extension)
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE well_data SET filename = ? WHERE filename = ?", 
-            (new_name, old_name)
-        )
-        
-        if cursor.rowcount == 0:
-            conn.close()
-            return jsonify({"error": "Routine not found in database or filesystem."}), 404
+            return jsonify({"error": f"Routine '{filename}' not found."}), 404
             
         conn.commit()
         conn.close()
-        return jsonify({"message": f"Routine '{old_name}' renamed to '{new_name}' successfully in database."}), 200
+        # Cascade takes care of well_data and routine_schedule deletion
+        return jsonify({"message": f"Routine '{filename}' deleted successfully."}), 200
     except sqlite3.Error as e:
         conn.close()
-        return jsonify({"error": f"Database error during renaming: {e}"}), 500        
-    
-# --- Main entry point to run the application ---
+        return jsonify({"error": f"Database error: {e}"}), 500
+
+# --- Scheduling/Status Routes (Minimal Change) ---
+
+@app.route("/routines/move-to-active-sql", methods=["POST"])
+def move_to_active_sql():
+    """Inserts into routine_schedule CHILD table with the next available start time."""
+    data = request.json
+    filename = data.get("filename")
+    if not filename:
+        return jsonify({"error": "Filename not provided."}), 400
+
+    conn = get_db_connection()
+    try:
+        # Check if the routine exists in PARENT 'routines' table
+        exists = conn.execute("SELECT 1 FROM routines WHERE filename = ?", (filename,)).fetchone()
+        if not exists:
+            conn.close()
+            return jsonify({"error": f"Routine '{filename}' not found in the routines master list."}), 404
+
+        schedule_day, start_time = get_next_available_time()
+
+        # Insert into CHILD table: routine_schedule
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO routine_schedule (filename, schedule_day, start_time)
+            VALUES (?, ?, ?)
+        """, (filename, schedule_day, start_time))
+        
+        conn.commit()
+        conn.close()
+        return jsonify({"message": f"Routine '{filename}' set to active in database with schedule day {schedule_day} at {start_time}."}), 200
+    except sqlite3.Error as e:
+        conn.close()
+        return jsonify({"error": f"Database error: {e}"}), 500
+      
+@app.route("/routines/move-to-inactive-sql", methods=["POST"])
+def move_to_inactive_sql():
+    """Removes a routine from the active list by deleting its record from routine_schedule."""
+    data = request.json
+    filename = data.get("filename")
+    if not filename:
+        return jsonify({"error": "Filename not provided."}), 400
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # Delete the entry from the CHILD table: routine_schedule
+        cursor.execute("DELETE FROM routine_schedule WHERE filename = ?", (filename,))
+        
+        if cursor.rowcount == 0:
+            conn.close()
+            return jsonify({"error": "Routine not found in active list."}), 404
+            
+        conn.commit()
+        conn.close()
+        return jsonify({"message": f"Routine '{filename}' removed from active list."}), 200
+    except sqlite3.Error as e: 
+        conn.close()
+        return jsonify({"error": f"Database error: {e}"}), 500
+        
+@app.route("/routines/schedule-update", methods=["POST"])
+def update_routine_schedule():
+    """Updates the schedule (day and time) for an active routine in routine_schedule."""
+    data = request.json
+    filename = data.get("filename")
+    day = data.get("day")
+    time = data.get("time")
+
+    if not all([filename, day, time]):
+        return jsonify({"error": "Filename, day, or time missing."}), 400
+        
+    try:
+        schedule_day = int(day)
+        if not time.count(':') == 1 or len(time) != 5:
+            raise ValueError("Time format is invalid. Must be HH:MM.")
+            
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE routine_schedule 
+            SET schedule_day = ?, start_time = ? 
+            WHERE filename = ?
+        """, (schedule_day, time, filename))
+        
+        if cursor.rowcount == 0:
+            conn.close()
+            return jsonify({"error": f"Routine '{filename}' not found in active list."}), 404
+            
+        conn.commit()
+        conn.close()
+        return jsonify({"message": f"Schedule for '{filename}' updated to Day {schedule_day} at {time}."}), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except sqlite3.Error as e:
+        conn.close()
+        return jsonify({"error": f"Database error: {e}"}), 500
+       
 if __name__ == '__main__':
     # Initialize the database *before* running the app
     init_db()

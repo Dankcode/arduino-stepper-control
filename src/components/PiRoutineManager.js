@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation'; // Import useRouter for client-side navigation
+import React, { useState, useEffect, useMemo } from 'react';
+import { useRouter } from 'next/navigation'; 
 
 /**
  * PiRoutineManager component to manage routines on the Raspberry Pi backend.
@@ -11,7 +11,6 @@ import { useRouter } from 'next/navigation'; // Import useRouter for client-side
  * @param {string} props.connectionStatus The current connection status.
  */
 const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
-  // Use Next.js Router for redirecting to the routine creation/edit page
   const router = useRouter(); 
 
   // State for routine data and UI elements
@@ -25,10 +24,166 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [fileToDelete, setFileToDelete] = useState(null);
   const [hasMounted, setHasMounted] = useState(false);
+  
+  // State for locally changing the schedule before saving
+  const [localSchedule, setLocalSchedule] = useState({});
+  // Stores the schedule as fetched from the backend for change detection
+  const [initialLocalSchedule, setInitialLocalSchedule] = useState({});
+  // State for displaying schedule validation errors
+  const [scheduleError, setScheduleError] = useState(null);
+
+  // Helper function to generate time options (Kept for reference).
+  const generateTimeOptions = () => {
+      const times = [];
+      for (let h = 0; h < 24; h++) {
+          for (let m = 0; m < 60; m += 30) {
+              const hour = String(h).padStart(2, '0');
+              const minute = String(m).padStart(2, '0');
+              times.push(`${hour}:${minute}`);
+          }
+      }
+      return times;
+  };
+
+  const timeOptions = useMemo(generateTimeOptions, []); 
+
+  // --- TIME CONVERSION HELPERS ---
+
+  /**
+   * Converts 24-hour time string (HH:MM) to local 12-hour components (HH, MM, Period).
+   */
+  const convert24toLocal12Hour = (time24) => {
+    if (!time24 || typeof time24 !== 'string') return { hour: '12', minute: '00', period: 'AM' };
+    
+    const parts = time24.split(':');
+    if (parts.length !== 2) return { hour: '12', minute: '00', period: 'AM' };
+
+    let [h, m] = parts.map(s => parseInt(s, 10));
+    
+    if (isNaN(h) || isNaN(m)) return { hour: '12', minute: '00', period: 'AM' };
+    
+    const date = new Date(2000, 0, 1, h, m);
+    const timeFormatter = new Intl.DateTimeFormat('en-US', { 
+      hour: 'numeric', 
+      minute: 'numeric', 
+      hour12: true 
+    }).formatToParts(date);
+    
+    let hour = '12';
+    let minute = '00';
+    let period = 'AM';
+
+    for (const part of timeFormatter) {
+      if (part.type === 'hour') hour = String(part.value).padStart(2, '0');
+      if (part.type === 'minute') minute = part.value;
+      if (part.type === 'dayPeriod') period = part.value;
+    }
+
+    hour = hour.length === 1 ? `0${hour}` : hour;
+
+    return { hour, minute, period };
+  };
+
+  /**
+   * Converts 12-hour components (HH, MM, Period) to 24-hour time (HH:MM) for the backend.
+   */
+  const convertLocal12to24Hour = (hour12, minute, period) => {
+    let h = parseInt(hour12, 10);
+    let m = parseInt(minute, 10);
+
+    if (isNaN(h) || h < 1 || h > 12 || isNaN(m) || m < 0 || m > 59) return null;
+
+    if (period === 'PM' && h !== 12) {
+        h += 12;
+    } else if (period === 'AM' && h === 12) {
+        h = 0; // Midnight (12 AM is 00:00)
+    }
+    
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  };
+
+  /**
+   * Converts 24-hour time string (HH:MM) to total minutes past midnight.
+   * @param {string} time24 - Time in 24-hour format (e.g., "15:30").
+   * @returns {number} Total minutes past midnight.
+   */
+  const militaryTimeToMinutes = (time24) => {
+    if (!time24) return -1;
+    const [h, m] = time24.split(':').map(Number);
+    return h * 60 + m;
+  };
+  
+  // --- OVERLAP CHECKER ---
+  /**
+   * Checks if a routine's proposed new start time causes it to overlap with any other active routine.
+   * @param {string} checkingRoutineName - The name of the routine whose time is being checked.
+   * @param {string} newTime24 - The proposed 24-hour start time for the checking routine.
+   * @param {number} runtimeSeconds - The total runtime of the checking routine.
+   * @param {Array} currentActiveRoutines - The list of active routines, which MUST contain the proposed new times for ALL routines (including the one being checked).
+   * @param {Array} allRoutinesData - The list of all routines with their runtimes.
+   * @returns {boolean} True if an overlap is found, false otherwise.
+   */
+  const checkOverlap = (checkingRoutineName, newTime24, runtimeSeconds, currentActiveRoutines, allRoutinesData) => {
+    // Get new routine's start and end times in minutes past midnight (0-1440)
+    const newStartMinutes = militaryTimeToMinutes(newTime24);
+    const newDurationMinutes = Math.ceil(runtimeSeconds / 60); 
+    const newEndMinutes = (newStartMinutes + newDurationMinutes); // May exceed 1440
+
+    // The list passed as currentActiveRoutines now contains all proposed times
+    for (const routine of currentActiveRoutines) {
+        // Skip the routine being checked against itself
+        if (routine.name === checkingRoutineName) continue; 
+        
+        // 1. Get the conflicting routine's runtime
+        const otherRoutineData = allRoutinesData.find(r => r.name.replace('.sql', '') === routine.name);
+        const otherRuntimeSeconds = otherRoutineData?.totalRuntime || 0;
+        const otherDurationMinutes = Math.ceil(otherRuntimeSeconds / 60);
+        
+        // 2. Get the conflicting routine's schedule
+        const otherStartMinutes = militaryTimeToMinutes(routine.time); // routine.time is the proposed time from the list
+        const otherEndMinutes = (otherStartMinutes + otherDurationMinutes); // May exceed 1440
+
+        // Function to check if a single time point (in 1440-range) falls within a routine's interval
+        const isTimeInInterval = (timePoint, start, end, duration) => {
+             // Handle standard interval (00:00 to 23:59)
+             if (start + duration <= 1440) {
+                 return timePoint >= start && timePoint < end;
+             }
+             // Handle wrap-around interval (e.g., 23:00 to 01:00)
+             const wrappedTimePoint = timePoint % 1440;
+             const wrappedStart = start % 1440;
+             const wrappedEnd = end % 1440; // This is the end time on the next day's 0-24 clock
+
+             return wrappedTimePoint >= wrappedStart || wrappedTimePoint < wrappedEnd;
+        };
+
+        // Check 1: Does the start time of A fall into B?
+        if (isTimeInInterval(newStartMinutes, otherStartMinutes, otherEndMinutes, otherDurationMinutes)) {
+            return true;
+        }
+
+        // Check 2: Does the minute *just before* the end of A fall into B?
+        if (newDurationMinutes > 0 && isTimeInInterval((newEndMinutes - 1) % 1440, otherStartMinutes, otherEndMinutes, otherDurationMinutes)) {
+             return true;
+        }
+        
+        // Check 3: Does the start time of B fall into A?
+        if (isTimeInInterval(otherStartMinutes, newStartMinutes, newEndMinutes, newDurationMinutes)) {
+            return true;
+        }
+        
+        // Check 4: Does the minute *just before* the end of B fall into A?
+        if (otherDurationMinutes > 0 && isTimeInInterval((otherEndMinutes - 1) % 1440, newStartMinutes, newEndMinutes, newDurationMinutes)) {
+             return true;
+        }
+    }
+    
+    return false;
+  };
 
   // Helper function to convert seconds to a human-readable format
   const formatTime = (totalSeconds) => {
-    if (totalSeconds === 0) return '0s';
+    if (totalSeconds === undefined || totalSeconds === null || totalSeconds === 0) return '0s';
     const days = Math.floor(totalSeconds / (3600 * 24));
     const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -38,18 +193,17 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     if (days > 0) parts.push(`${days}d`);
     if (hours > 0) parts.push(`${hours}h`);
     if (minutes > 0) parts.push(`${minutes}m`);
-    // Only show seconds if total time is less than a minute or it's non-zero
     if (seconds > 0 || totalSeconds < 60) parts.push(`${seconds}s`); 
 
     return parts.join(' ');
   };
-
+  
   /**
    * Fetches all available routines from the backend.
-   * Backend now includes 'totalRuntime' in the response.
    */
   const fetchAllRoutines = async () => {
     setIsLoading(true);
+    setScheduleError(null); 
     try {
       const response = await fetch(`${PI_BACKEND_URL}/routines/all`);
       if (!response.ok) {
@@ -57,10 +211,25 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
       }
       const data = await response.json();
       
-      // Data now includes totalRuntime directly, no client-side parsing needed
       setAllRoutines(data.all_routines); 
       setActiveRoutines(data.active_routines);
 
+      // Convert fetched 24-hour time to local 12-hour components for the state
+      const initialSchedule = data.active_routines.reduce((acc, routine) => {
+          const converted = convert24toLocal12Hour(routine.time);
+          acc[routine.name] = { 
+              day: routine.day, 
+              time12: converted.hour,
+              minute: converted.minute,
+              period: converted.period,
+              time24: routine.time // Store 24-hour time for comparison
+          };
+          return acc;
+      }, {});
+      // Set both local (editable) and initial (baseline) schedules
+      setLocalSchedule(initialSchedule);
+      setInitialLocalSchedule(initialSchedule);
+      
     } catch (error) {
       console.error('Error fetching routines:', error);
       setAllRoutines([]);
@@ -70,34 +239,148 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     }
   };
 
-  // --- Core CRUD Functions for SQL Backend ---
-  
   /**
-   * Handles saving a routine's schedule or renaming it.
+   * Computed value to detect unsaved changes in the schedule.
    */
-  const handleSave = async (routine) => {
-    const routineNameWithoutExtension = routine.name.replace('.sql', ''); // Get base name
-    const isInactiveRoutine = allRoutines.some(r => r.name === routine.name);
+  const hasUnsavedChanges = useMemo(() => {
+    // Cannot detect changes if baseline data hasn't loaded
+    if (!initialLocalSchedule || Object.keys(initialLocalSchedule).length === 0) {
+        // If there are active routines but no initial state, something is being loaded
+        return activeRoutines.length > 0 && Object.keys(localSchedule).length > 0;
+    }
 
-    if (isRenaming && (selectedRoutine?.name === routine.name || selectedActiveRoutine?.name === routine.name)) {
+    for (const routine of activeRoutines) {
+        const routineName = routine.name;
+        const local = localSchedule[routineName];
+        const initial = initialLocalSchedule[routineName];
+        
+        // Check if any time component differs
+        if (local && initial && (
+            local.time12 !== initial.time12 ||
+            local.minute !== initial.minute ||
+            local.period !== initial.period)
+        ) {
+            return true;
+        }
+    }
+    return false;
+  }, [localSchedule, initialLocalSchedule, activeRoutines]);
+
+  /**
+   * Handles saving ALL scheduled routine updates.
+   */
+  const handleSaveAllSchedules = async () => {
+    setScheduleError(null);
+    const updatesToPerform = [];
+
+    // 1. Create a proposed schedule list for simultaneous conflict checking
+    const proposedActiveRoutines = activeRoutines.map(routine => {
+      const routineName = routine.name;
+      const local = localSchedule[routineName];
+      const initial = initialLocalSchedule[routineName];
+
+      const time24Hour = convertLocal12to24Hour(
+          local.time12, 
+          local.minute, 
+          local.period
+      );
+      
+      if (!time24Hour) {
+          // Time format validation failed. Set error and return a placeholder to be filtered.
+          setScheduleError(`Invalid time format for routine '${routineName}'. Please correct and try again.`);
+          return null; 
+      }
+
+      // If time has changed, add it to the list of API updates
+      if (time24Hour !== initial?.time24) {
+          updatesToPerform.push({
+              routineName,
+              newTime24Hour: time24Hour,
+              newDay: local.day,
+              runtime: allRoutines.find(r => r.name.replace('.sql', '') === routineName)?.totalRuntime || 0,
+          });
+      }
+
+      // Return the routine object with the PROPOSED new time
+      return {
+          name: routineName,
+          day: local.day,
+          time: time24Hour // Proposed time for overlap checking
+      };
+    }).filter(r => r !== null); // Filter out any routines with invalid time formats
+
+    if (scheduleError) return; // Exit if initial time validation failed
+
+    // Safety check: if button was enabled but no changes found (e.g., initial load race condition)
+    if (updatesToPerform.length === 0) {
+        setScheduleError("No schedule changes detected to save.");
+        return;
+    }
+
+    // 2. Perform Overlap Check against the proposed schedule
+    for (const update of updatesToPerform) {
+        // Pass the ENTIRE proposedActiveRoutines list for comparison
+        if (checkOverlap(update.routineName, update.newTime24Hour, update.runtime, proposedActiveRoutines, allRoutines)) {
+            // --- MODIFIED LOGIC HERE: Revert ALL changes on conflict ---
+            
+            // CONFLICT FOUND: Display error and revert ALL local changes
+            setScheduleError(`Cannot save changes. Scheduling conflict detected involving routine '${update.routineName}'. The machine cannot run two routines at once. All unsaved changes have been reverted.`);
+            
+            // Revert the ENTIRE localSchedule to the last successfully fetched state
+            setLocalSchedule(initialLocalSchedule); 
+            
+            return; // Stop the entire save operation on the first conflict
+        }
+    }
+
+    // 3. Perform API Updates (Sequential)
+    let hadApiError = false;
+
+    for (const update of updatesToPerform) {
+        try {
+            const response = await fetch(`${PI_BACKEND_URL}/routines/schedule-update`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filename: update.routineName,
+                    day: update.newDay, 
+                    time: update.newTime24Hour, 
+                }),
+            });
+            if (!response.ok) {
+                 throw new Error(`Failed to update routine '${update.routineName}'.`);
+            }
+        } catch (error) {
+            console.error('Error saving routine schedule:', error);
+            setScheduleError(`Error saving schedule for ${update.routineName}. Other changes were canceled: ${error.message}`);
+            hadApiError = true;
+            break; // Stop on first API error
+        }
+    }
+    
+    // 4. Final state update
+    if (!hadApiError) {
+        await fetchAllRoutines(); // Refetch to sync state and reset initialLocalSchedule
+        setScheduleError("All schedule updates saved successfully! 🎉");
+    }
+  };
+
+
+  // --- Helper/Action Functions (Renaming, Deleting, Moving) remain the same ---
+
+  const handleSave = async (routine) => {
+    const isInactiveRoutine = allRoutines.some(r => r.name === routine.name);
+    if (isRenaming) {
       if (!newRoutineName) {
         console.error("Invalid name. Must not be empty.");
         return;
       }
-      
-      // Determine the old name to be passed to the backend (base name without extension)
-      const oldBaseName = isInactiveRoutine 
-        ? routineNameWithoutExtension 
-        : routine.name; // Active routines use the full timestamped name
-
-      // Determine the new name to be passed (base name without extension)
+      const oldBaseName = isInactiveRoutine ? routine.name.replace('.sql', '') : routine.name; 
       const newBaseName = `${newRoutineName}`; 
-
       try {
         const response = await fetch(`${PI_BACKEND_URL}/routines/rename`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          // Send base name for inactive routines, full name for active
           body: JSON.stringify({ oldName: oldBaseName, newName: newBaseName }), 
         });
         if (!response.ok) {
@@ -110,39 +393,11 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
         setIsRenaming(false);
         setNewRoutineName('');
       }
-    } else {
-      // Otherwise, it's a schedule update for an active routine (file system operation)
-      // This part is unchanged as scheduling still relies on file system naming.
-      try {
-        const response = await fetch(`${PI_BACKEND_URL}/routines/schedule`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            filename: routine.name, // The full timestamped filename
-            day: routine.day,
-            time: routine.time,
-          }),
-        });
-        if (!response.ok) {
-          throw new Error('Failed to save routine schedule.');
-        }
-        await fetchAllRoutines();
-      } catch (error) {
-        console.error('Error saving routine schedule:', error);
-      }
     }
   };
-  
-  /**
-   * Handles the deletion of a routine file/data on the backend.
-   * @param {string} filename The full name of the routine (e.g., MyRoutine.sql or timestamped).
-   */
-  const handleDeleteFile = async (filename) => {
-    // Determine the name to send: base name for inactive routines, full name for active
-    const nameToSend = allRoutines.some(r => r.name === filename) 
-      ? filename.replace('.sql', '') // Send base name without extension for SQL deletion
-      : filename; // Send full timestamped name for file deletion (Active routines)
 
+  const handleDeleteFile = async (filename) => {
+    const nameToSend = filename.replace('.sql', ''); 
     try {
       const response = await fetch(`${PI_BACKEND_URL}/routines/delete`, {
         method: 'POST',
@@ -160,68 +415,66 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     }
   };
 
-  /**
-   * Redirects the user to the routine creation page with the selected routine's name
-   * for data fetching and editing.
-   * @param {string} filename The base name of the routine (without .sql extension).
-   */
   const handleEditRoutine = (filename) => {
-    // The query should send the base name for the backend to fetch the data
     const routineBaseName = filename.replace('.sql', ''); 
-    // Assuming your routine creation/edit page is at '/routine-creator'
     router.push(`/routine-creator?edit=${routineBaseName}`);
   };
 
-  // --- Other Existing Functions ---
-  // (moveToActive, moveToInactive, onLocalUpdateActiveRoutine are left for brevity but would be included)
-
-  /**
-   * Moves a routine from inactive to active list on the backend.
-   * @param {string} filename The name of the routine file.
-   */
   const moveToActive = async (filename) => {
+    const routineBaseName = filename.replace('.sql', ''); 
     try {
-      const response = await fetch(`${PI_BACKEND_URL}/routines/move-to-active`, {
+      const response = await fetch(`${PI_BACKEND_URL}/routines/move-to-active-sql`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename }),
+        body: JSON.stringify({ filename: routineBaseName }),
       });
       if (!response.ok) {
-        throw new Error('Failed to move routine to active list.');
+        throw new Error('Failed to set routine as active in SQL.');
       }
       await fetchAllRoutines();
+      setSelectedRoutine(null);
     } catch (error) {
-      console.error('Error moving routine to active:', error);
+      console.error('Error setting routine active:', error);
     }
   };
 
-  /**
-   * Moves a routine from active to inactive list on the backend.
-   * @param {string} filename The name of the routine file.
-   */
   const moveToInactive = async (filename) => {
+    const routineBaseName = filename; 
     try {
-      const response = await fetch(`${PI_BACKEND_URL}/routines/move-to-inactive`, {
+      const response = await fetch(`${PI_BACKEND_URL}/routines/move-to-inactive-sql`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename }),
+        body: JSON.stringify({ filename: routineBaseName }),
       });
       if (!response.ok) {
-        throw new Error('Failed to move routine to inactive list.');
+        throw new Error('Failed to remove active tag in SQL.');
       }
       await fetchAllRoutines();
+      setSelectedActiveRoutine(null); 
     } catch (error) {
-      console.error('Error moving routine to inactive:', error);
+      console.error('Error setting routine inactive:', error);
     }
   };
   
-  const onLocalUpdateActiveRoutine = (filename, day, time) => {
-    setActiveRoutines(prev => prev.map(r => 
-      r.name === filename ? { ...r, day, time } : r
-    ));
+  /**
+   * Updates the local state for a specific active routine's schedule.
+   */
+  const onLocalUpdateActiveRoutine = (filename, key, value) => {
+    let finalValue = value;
+    if (key === 'time12' || key === 'minute') {
+        finalValue = value.replace(/[^0-9]/g, '').slice(0, 2); 
+    }
+
+    setLocalSchedule(prev => ({
+        ...prev,
+        [filename]: {
+            ...prev[filename],
+            [key]: finalValue
+        }
+    }));
   };
   
-  // --- Effect Hooks for Data Loading ---
+  // --- Effect Hooks for Data Loading & UI Handlers (unchanged) ---
   useEffect(() => {
     setHasMounted(true);
   }, []);
@@ -232,13 +485,11 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     }
   }, [hasMounted, PI_BACKEND_URL]);
 
-  // --- Local UI Handlers ---
   const handleRenameClick = () => {
     const routine = selectedRoutine || selectedActiveRoutine;
     if (routine) {
       setIsRenaming(true);
-      // Remove extension for the input placeholder
-      const baseName = routine.name.replace('.sql', '').split('-').pop(); 
+      const baseName = routine.name.replace('.sql', ''); 
       setNewRoutineName(baseName);
     }
   };
@@ -260,263 +511,167 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
   };
   
   if (!hasMounted) {
-    return null; // Return nothing on the initial server render
+    return null;
   }
 
-  // Determine the currently selected routine for the action buttons
   const routineForActions = selectedRoutine || selectedActiveRoutine;
 
   return (
     <div className="main-container">
+      {/* --- CSS Style Block (Modified for Global Save Button) --- */}
       <style>{`
         .main-container {
-            display: flex;
-            flex-direction: column;
-            gap: 2rem; /* corresponds to gap-8 */
-            padding: 1.5rem; /* corresponds to p-6 */
-            background-color: #f9fafb; /* corresponds to bg-gray-50 */
-            min-height: 800px; /* corresponds to min-h-[800px] */
-            width: 100%;
-            max-width: 64rem; /* corresponds to max-w-4xl */
-            margin: 0 auto;
-            border-radius: 0.75rem; /* corresponds to rounded-xl */
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); /* corresponds to shadow-2xl */
-            border: 2px solid #e5e7eb; /* corresponds to border-2 border-gray-200 */
+            padding: 2rem;
+            max-width: 1200px;
+            margin: auto;
         }
-
-        .title {
-            text-align: center;
-            font-size: 1.875rem; /* corresponds to text-3xl */
-            font-weight: 700; /* corresponds to font-bold */
-            color: #1f2937; /* corresponds to text-gray-800 */
-        }
-
         .columns-container {
             display: flex;
-            flex-direction: column;
-            gap: 2rem; /* corresponds to gap-8 */
+            gap: 20px;
         }
-
-        @media (min-width: 768px) {
-            .columns-container {
-                flex-direction: row;
-            }
-        }
-
         .column {
             flex: 1;
-            padding: 1.5rem; /* corresponds to p-6 */
-            background-color: #ffffff; /* corresponds to bg-white */
-            border-radius: 0.75rem; /* corresponds to rounded-xl */
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); /* corresponds to shadow-md */
-            border: 1px solid #e5e7eb; /* corresponds to border border-gray-200 */
-            min-width: 300px; /* corresponds to min-w-[300px] */
-        }
-
-        .column-title {
-            font-size: 1.25rem; /* corresponds to text-xl */
-            font-weight: 700; /* corresponds to font-bold */
-            margin-bottom: 1rem; /* corresponds to mb-4 */
-            color: #1f2937; /* corresponds to text-gray-800 */
-        }
-
-        .routine-list {
+            background: #f9fafb;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            min-height: 500px;
             display: flex;
             flex-direction: column;
-            gap: 0.5rem; /* corresponds to gap-2 */
-            max-height: 24rem; /* corresponds to max-h-96 */
-            overflow-y: auto;
-            padding-right: 0.5rem; /* corresponds to pr-2 */
         }
-
+        .column-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 0.5rem;
+        }
+        .routine-list {
+            list-style: none;
+            padding: 0;
+            flex-grow: 1;
+        }
         .list-item {
-            padding: 0.75rem; /* corresponds to p-3 */
-            border-radius: 0.5rem; /* corresponds to rounded-lg */
-            border: 1px solid;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.5rem;
+            border-radius: 0.375rem;
             cursor: pointer;
-            transition-property: background-color;
-            transition-duration: 200ms;
+            transition: background-color 0.15s;
         }
-
-        .list-item-selected {
-            background-color: #bfdbfe; /* corresponds to bg-blue-200 */
-            border-color: #3b82f6; /* corresponds to border-blue-500 */
-        }
-
         .list-item-default {
-            background-color: #ffffff; /* corresponds to bg-white */
-            border-color: #e5e7eb; /* corresponds to border-gray-200 */
+            background-color: #ffffff;
+            border: 1px solid #e5e7eb;
         }
-
-        .list-item-default:hover {
-            background-color: #f3f4f6; /* corresponds to hover:bg-gray-100 */
+        .list-item-selected {
+            background-color: #d1fae5; /* Green 100 */
+            border: 1px solid #10b981; /* Green 500 */
         }
-
-        .list-item-content {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
+        .list-item:hover:not(.list-item-selected) {
+            background-color: #f3f4f6;
         }
-
         .routine-name {
-            font-size: 0.875rem; /* corresponds to text-sm */
-            font-weight: 500; /* corresponds to font-medium */
-            color: #1f2937; /* corresponds to text-gray-800 */
+            font-weight: 500;
+            color: #1f2937;
         }
-
         .routine-runtime {
-          font-size: 0.75rem;
-          color: #6b7280;
-          font-weight: 400;
-          margin-left: 0.5rem;
+            font-size: 0.875rem;
+            color: #6b7280;
+            margin-left: 0.5rem;
         }
-
-        .italic-text {
-            font-size: 0.875rem; /* corresponds to text-sm */
-            color: #6b7280; /* corresponds to text-gray-500 */
-            font-style: italic;
-        }
-
-        .buttons-container {
-            display: flex;
-            gap: 0.5rem;
-            margin-top: 1rem;
-            justify-content: flex-end;
-        }
-
-        .rename-input-container {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            width: 100%;
-        }
-
-        .rename-input {
-            width: 100%;
-            padding: 0.5rem;
-            border: 1px solid #d1d5db; /* corresponds to border-gray-300 */
-            border-radius: 0.375rem; /* corresponds to rounded-md */
-            outline: none;
-        }
-
-        .rename-input:focus {
-            box-shadow: 0 0 0 2px #3b82f6; /* corresponds to focus:ring-2 focus:ring-blue-500 */
-        }
-
-        .save-button {
-            padding: 0.5rem 1rem; /* corresponds to py-2 px-4 */
-            background-color: #10b981; /* corresponds to bg-emerald-500 */
-            color: #ffffff;
-            border-radius: 0.375rem; /* corresponds to rounded-md */
-            font-size: 0.875rem; /* corresponds to text-sm */
-            transition-property: background-color;
-            transition-duration: 150ms;
-        }
-
-        .save-button:hover {
-            background-color: #059669; /* corresponds to hover:bg-emerald-600 */
-        }
-
-        .rename-button {
-            padding: 0.5rem 1rem; /* corresponds to py-2 px-4 */
-            font-size: 0.875rem; /* corresponds to text-sm */
-            border-radius: 0.5rem; /* corresponds to rounded-lg */
-            cursor: pointer;
-            background-color: #f59e0b; /* corresponds to bg-amber-500 */
-            color: #ffffff;
-            transition-property: background-color;
-            transition-duration: 150ms;
-        }
-
-        .rename-button:hover {
-            background-color: #d97706; /* corresponds to hover:bg-amber-600 */
-        }
-
-        .delete-button {
-            padding: 0.5rem 1rem; /* corresponds to py-2 px-4 */
-            font-size: 0.875rem; /* corresponds to text-sm */
-            border-radius: 0.5rem; /* corresponds to rounded-lg */
-            cursor: pointer;
-            background-color: #ef4444; /* corresponds to bg-red-500 */
-            color: #ffffff;
-            transition-property: background-color;
-            transition-duration: 150ms;
-        }
-
-        .delete-button:hover {
-            background-color: #dc2626; /* corresponds to hover:bg-red-600 */
-        }
-
         .transfer-button-container {
             display: flex;
-            flex-direction: row;
-            align-items: center;
+            flex-direction: column;
             justify-content: center;
+            align-items: center;
             gap: 1rem;
-            margin: auto 0;
         }
-
-        @media (min-width: 768px) {
-            .transfer-button-container {
-                flex-direction: column;
-            }
-        }
-
         .transfer-button {
-            padding: 0.75rem;
-            background-color: #3b82f6; /* corresponds to bg-blue-500 */
-            color: #ffffff;
-            border-radius: 9999px; /* corresponds to rounded-full */
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); /* corresponds to shadow-lg */
-            transition-property: background-color;
-            transition-duration: 150ms;
-            font-size: 1.25rem; /* corresponds to text-xl */
+            padding: 0.5rem 1rem;
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            font-size: 1.5rem;
+            cursor: pointer;
+            transition: background-color 0.15s;
         }
-
-        .transfer-button:hover {
-            background-color: #2563eb; /* corresponds to hover:bg-blue-600 */
-        }
-
         .transfer-button:disabled {
-            opacity: 0.5;
+            background-color: #9ca3af;
             cursor: not-allowed;
         }
-
-        .input-group {
+        .transfer-button:hover:not(:disabled) {
+            background-color: #2563eb;
+        }
+        .buttons-container {
+            margin-top: 1rem;
             display: flex;
-            align-items: center;
             gap: 0.5rem;
+            justify-content: flex-end;
         }
-
-        .input-number {
-            width: 3rem;
-            text-align: center;
-            padding: 0.25rem;
-            border: 1px solid #d1d5db; /* corresponds to border-gray-300 */
-            border-radius: 0.375rem; /* corresponds to rounded-md */
-        }
-
-        .input-time {
-            width: 6rem;
-            padding: 0.25rem;
-            border: 1px solid #d1d5db; /* corresponds to border-gray-300 */
-            border-radius: 0.375rem; /* corresponds to rounded-md */
-        }
-
-        .save-small-button {
-            padding: 0.25rem 0.75rem;
-            background-color: #10b981;
-            color: #ffffff;
+        .edit-button-sql, .rename-button, .delete-button {
+            padding: 0.5rem 1rem;
+            border: none;
             border-radius: 0.5rem;
-            font-size: 0.875rem;
-            transition-property: background-color;
-            transition-duration: 150ms;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.15s;
         }
-
-        .save-small-button:hover {
-            background-color: #059669;
+        .edit-button-sql:disabled {
+          background-color: #9ca3af;
+          cursor: not-allowed;
         }
-
+        .edit-button-sql {
+            background-color: #93c5fd; /* Blue 300 */
+            color: #1e40af; /* Blue 800 */
+        }
+        .edit-button-sql:hover {
+            background-color: #60a5fa;
+        }
+        .rename-button {
+            background-color: #fcd34d; /* Amber 300 */
+            color: #92400e; /* Amber 800 */
+        }
+        .rename-button:hover {
+            background-color: #fbbf24;
+        }
+        .delete-button {
+            background-color: #fca5a5; /* Red 300 */
+            color: #b91c1c; /* Red 800 */
+        }
+        .delete-button:hover {
+            background-color: #f87171;
+        }
+        .rename-input-container {
+            display: flex;
+            gap: 0.5rem;
+            width: 100%;
+        }
+        .rename-input {
+            flex-grow: 1;
+            padding: 0.5rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.375rem;
+        }
+        .save-button {
+            padding: 0.5rem 1rem;
+            background-color: #10b981;
+            color: white;
+            border-radius: 0.5rem;
+            cursor: pointer;
+        }
+        .cancel-button-small {
+            padding: 0.5rem 1rem;
+            background-color: #d1d5db;
+            color: #1f2937;
+            border-radius: 0.5rem;
+            cursor: pointer;
+        }
+        .italic-text {
+            font-style: italic;
+            color: #6b7280;
+        }
+        
+        /* Modal Styles */
         .modal-backdrop {
             position: fixed;
             top: 0;
@@ -527,75 +682,116 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
             display: flex;
             justify-content: center;
             align-items: center;
-            z-index: 50;
+            z-index: 1000;
         }
-
         .modal-content {
-            background-color: #ffffff;
-            padding: 1.5rem;
+            background: white;
+            padding: 2rem;
             border-radius: 0.5rem;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            max-width: 400px;
+            width: 90%;
             text-align: center;
-            width: 400px;
         }
-
         .modal-title {
-            font-size: 1.125rem;
-            font-weight: 700;
-        }
-
-        .modal-text {
-            margin-top: 0.5rem;
-        }
-
-        .modal-text .file-name {
+            font-size: 1.5rem;
             font-weight: 600;
+            margin-bottom: 1rem;
         }
-
+        .modal-text {
+            margin-bottom: 1.5rem;
+        }
+        .file-name {
+            font-weight: bold;
+            color: #dc2626; /* Red 600 */
+        }
         .modal-buttons {
-            margin-top: 1rem;
             display: flex;
             justify-content: center;
             gap: 1rem;
         }
-
         .confirm-delete-button {
+            background-color: #ef4444; /* Red 500 */
+            color: white;
             padding: 0.5rem 1rem;
-            font-size: 1rem;
-            border-radius: 0.375rem;
-            cursor: pointer;
-            background-color: #ef4444;
-            color: #ffffff;
-        }
-
-        .cancel-button {
-            padding: 0.5rem 1rem;
-            font-size: 1rem;
-            border-radius: 0.375rem;
-            cursor: pointer;
-            background-color: #e5e7eb;
-            color: #4b5563;
-        }         
-        .edit-button-sql {
-            padding: 0.5rem 1rem;
-            font-size: 0.875rem;
             border-radius: 0.5rem;
             cursor: pointer;
-            background-color: #3b82f6; /* Blue-500 */
-            color: #ffffff;
-            transition-property: background-color;
-            transition-duration: 150ms;
-            }
-
-        .edit-button-sql:hover {
-            background-color: #2563eb; /* Blue-600 */
+            transition: background-color 0.15s;
+        }
+        .confirm-delete-button:hover {
+            background-color: #dc2626;
+        }
+        .cancel-button {
+            background-color: #d1d5db;
+            color: #1f2937;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: background-color 0.15s;
+        }
+        .cancel-button:hover {
+            background-color: #9ca3af;
+        }
+        /* NEW STYLES for Scheduling UI */
+        .input-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .input-group label {
+            font-size: 0.875rem;
+            color: #4b5563;
+        }
+        .input-number { 
+            width: 3rem; 
+            text-align: center;
+            padding: 0.25rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.375rem;
         }
 
+        .period-select { 
+            width: 4rem;
+            padding: 0.25rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.375rem;
+            background-color: white;
+            cursor: pointer;
+        }
+        
+        /* New Style for the main Save All button */
+        .global-save-button {
+            padding: 0.75rem 2rem;
+            background-color: #10b981;
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 1.1rem;
+            transition: background-color 0.15s, opacity 0.15s;
+            margin-top: 2rem;
+        }
+        .global-save-button:disabled {
+            background-color: #9ca3af; /* Gray color for disabled */
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+        .error-message {
+            color: #ef4444; /* Red 500 */
+            font-size: 0.875rem;
+            margin-top: 1rem;
+            padding: 0.75rem;
+            background-color: #fee2e2; /* Red 100 */
+            border-radius: 0.375rem;
+            border: 1px solid #f87171;
+        }
       `}</style>
+      {/* --- Main Content --- */}
       <div className="columns-container">
-        {/* All Routines Column */}
+        {/* All Routines Column (Inactive) */}
         <div className="column">
-          <h2 className="column-title">Routines (SQL Database)</h2>
+          <h2 className="column-title">Routines (Inactive/All Data)</h2>
           <ul className="routine-list">
             {isLoading ? (
               <p className="italic-text">Loading...</p>
@@ -607,6 +803,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
                   onClick={() => {
                     setSelectedRoutine(routine);
                     setSelectedActiveRoutine(null);
+                    setIsRenaming(false); 
                   }}
                 >
                   <div className="list-item-content">
@@ -623,6 +820,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
               ))
             )}
           </ul>
+          {/* Action Buttons for Inactive Routines */}
           {selectedRoutine && (
             <div className="buttons-container">
               {isRenaming && selectedRoutine?.name === routineForActions?.name ? (
@@ -666,7 +864,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
             onClick={() => moveToActive(selectedRoutine?.name)}
             disabled={!selectedRoutine || isRenaming}
             className="transfer-button"
-            title="Move to Active"
+            title="Move to Active (Scheduled)"
           >
             →
           </button>
@@ -674,57 +872,126 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
             onClick={() => moveToInactive(selectedActiveRoutine?.name)}
             disabled={!selectedActiveRoutine || isRenaming}
             className="transfer-button"
-            title="Move to Available"
+            title="Move to Inactive (Unschedule)"
           >
             ←
           </button>
         </div>
 
-        {/* Active Routines Column */}
+        {/* Active Routines Column (Scheduled) */}
         <div className="column">
-          <h2 className="column-title">Active Routines (Scheduling Files)</h2>
+          <h2 className="column-title">Active Routines (Schedule)</h2>
+          {/* Error Message Display */}
+          {scheduleError && <div className="error-message">{scheduleError}</div>}
+          
           <ul className="routine-list">
             {isLoading ? (
               <p className="italic-text">Loading...</p>
             ) : activeRoutines.length === 0 ? (
               <p className="italic-text">No active routines.</p>
             ) : (
-              activeRoutines.map((routine) => (
+              activeRoutines.map((routine) => {
+                const scheduleData = localSchedule[routine.name] || {};
+                
+                const hour = scheduleData.time12 || convert24toLocal12Hour(routine.time).hour;
+                const minute = scheduleData.minute || convert24toLocal12Hour(routine.time).minute;
+                const period = scheduleData.period || convert24toLocal12Hour(routine.time).period;
+
+                // Check if this routine has unsaved local changes to highlight the input
+                const hasLocalChange = hasUnsavedChanges && 
+                                       (localSchedule[routine.name]?.time12 !== initialLocalSchedule[routine.name]?.time12 ||
+                                        localSchedule[routine.name]?.minute !== initialLocalSchedule[routine.name]?.minute ||
+                                        localSchedule[routine.name]?.period !== initialLocalSchedule[routine.name]?.period);
+
+                // Get runtime data for display
+                const routineData = allRoutines.find(r => r.name.replace('.sql', '') === routine.name);
+                
+                return (
                 <li
                   key={routine.name}
                   className={`list-item ${selectedActiveRoutine?.name === routine.name ? 'list-item-selected' : 'list-item-default'}`}
                   onClick={() => {
                     setSelectedActiveRoutine(routine);
                     setSelectedRoutine(null);
+                    setIsRenaming(false); 
+                    setScheduleError(null); // Clear error when selecting a new routine
                   }}
                 >
                   <div className="list-item-content">
                     <div>
-                      <span className="routine-name">{routine.name.replace('.txt', '').split('-').slice(3).join('-')}</span>
-                       {routine.totalRuntime !== undefined && (
+                      <span className="routine-name">{routine.name}</span>
+                       {/* Display runtime from allRoutines data */}
+                       {routineData?.totalRuntime !== undefined && (
                         <span className="routine-runtime">
-                          (Run Time: {formatTime(routine.totalRuntime)})
+                          (Run Time: {formatTime(routineData.totalRuntime)})
                         </span>
                       )}
-                    </div>
-                    <div className="input-group">
-                      {/* Inputs and Save for Schedule are fine, removed for brevity */}
+                      {/* Display the local 12-hour time and inputs */}
+                      <div className="input-group" style={{marginTop: '0.75rem'}}>
+                        <label>Start Time:</label>
+                        
+                        {/* Hour Input (Numerical) */}
+                        <input
+                            type="number"
+                            value={scheduleData.time12 || ''}
+                            onChange={(e) => onLocalUpdateActiveRoutine(routine.name, 'time12', e.target.value)}
+                            className="input-number"
+                            min="1"
+                            max="12"
+                            placeholder="HH"
+                            style={hasLocalChange ? {border: '1px solid #3b82f6'} : {}}
+                        />
+                        <span>:</span>
+                        {/* Minute Input (Numerical) */}
+                        <input
+                            type="number"
+                            value={scheduleData.minute || ''}
+                            onChange={(e) => onLocalUpdateActiveRoutine(routine.name, 'minute', e.target.value)}
+                            className="input-number"
+                            min="0"
+                            max="59"
+                            placeholder="MM"
+                            style={hasLocalChange ? {border: '1px solid #3b82f6'} : {}}
+                        />
+                        
+                        {/* AM/PM Dropdown */}
+                        <select
+                            value={scheduleData.period || 'AM'}
+                            onChange={(e) => onLocalUpdateActiveRoutine(routine.name, 'period', e.target.value)}
+                            className="period-select"
+                            style={hasLocalChange ? {border: '1px solid #3b82f6'} : {}}
+                        >
+                            <option value="AM">AM</option>
+                            <option value="PM">PM</option>
+                        </select>
+                      </div>
                     </div>
                   </div>
                 </li>
-              ))
+              )})
             )}
           </ul>
+          {/* Action Buttons for Active Routines */}
           {selectedActiveRoutine && (
              <div className="buttons-container">
               {isRenaming && selectedActiveRoutine?.name === routineForActions?.name ? (
-                // Rename Input for Active Routine (similar to Inactive)
                 <div className="rename-input-container">
-                  {/* ... (Rename Input UI) ... */}
+                  <input
+                    type="text"
+                    value={newRoutineName}
+                    onChange={(e) => setNewRoutineName(e.target.value)}
+                    className="rename-input"
+                    placeholder="New routine name (no extension)"
+                  />
+                  <button onClick={() => handleSave(selectedActiveRoutine)} className="save-button">
+                    Save
+                  </button>
+                  <button onClick={() => setIsRenaming(false)} className="cancel-button-small">
+                    Cancel
+                  </button>
                 </div>
               ) : (
                 <>
-                  {/* Active routines cannot be "edited" in this context since they are just schedule links */}
                   <button onClick={handleRenameClick} className="rename-button">
                     Rename
                   </button>
@@ -736,6 +1003,17 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
             </div>
           )}
         </div>
+      </div>
+      
+      {/* Global Save Button for Schedules */}
+      <div style={{ display: 'flex', justifyContent: 'center' }}>
+        <button
+          onClick={handleSaveAllSchedules}
+          disabled={!hasUnsavedChanges}
+          className="global-save-button"
+        >
+          {hasUnsavedChanges ? 'Save All Schedules' : 'No Changes to Save'}
+        </button>
       </div>
 
     {/* Delete Confirmation Modal */}
