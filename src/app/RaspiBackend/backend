@@ -1,15 +1,10 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
-import time
-import shutil
 import sqlite3 # Import the sqlite3 library
 from datetime import datetime, timedelta 
+from manual_control import StepperController, global_controller, controller_lock
 
-# --- Configuration ---
-# Set the path to the folder where your routine files are stored.
-# IMPORTANT: This path is set for a standard Raspberry Pi setup.
-# Please update this path to match the actual location on your device if needed.
 ROUTINES_DIR = '/home/dank/routines/'
 ACTIVE_ROUTINES_DIR = '/home/dank/active_routines/'
 # Define the path for the SQLite database file
@@ -20,7 +15,6 @@ DATABASE_FILE = '/home/dank/routine_data.db'
 # or a configuration file. For this example, we'll just hardcode a value.
 ACTIVE_ROUTINE_FILE = 'example_active.txt'
 
-# --- Flask App Initialization ---
 app = Flask(__name__)
 # Enable CORS for all domains. This is necessary for the frontend application
 # to be able to make requests to this backend.
@@ -45,7 +39,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    
     # 2. CHILD Table: well_data (Routine Steps)
     # well_data is a CHILD of routines, using ON DELETE CASCADE
     cursor.execute("""
@@ -81,7 +74,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    
+
 def _time_to_minutes(schedule_day, start_time):
     # ... (Scheduling helper function, no change) ...
     try: 
@@ -157,7 +150,6 @@ def get_next_available_time():
          return current_day, current_time
         
     return _minutes_to_time(next_available_minutes)
-
 def find_routine_file(filename):
     # ... (existing code)
     pass # Placeholder to indicate existing functions are not repeated
@@ -223,8 +215,6 @@ def save_routine_sql():
         return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
     finally:
         conn.close()
-
-
 @app.route("/routines/all")
 def get_all_routines():
     """
@@ -286,7 +276,6 @@ def get_all_routines():
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 @app.route("/routines/rename", methods=["POST"])
 def rename_routine():
     """
@@ -334,7 +323,6 @@ def rename_routine():
     except Exception as e:
         conn.close()
         return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
-
 @app.route("/routines/delete", methods=["POST"])
 def delete_routine():
     """
@@ -364,9 +352,6 @@ def delete_routine():
     except sqlite3.Error as e:
         conn.close()
         return jsonify({"error": f"Database error: {e}"}), 500
-
-# --- Scheduling/Status Routes (Minimal Change) ---
-
 @app.route("/routines/move-to-active-sql", methods=["POST"])
 def move_to_active_sql():
     """Inserts into routine_schedule CHILD table with the next available start time."""
@@ -398,7 +383,6 @@ def move_to_active_sql():
     except sqlite3.Error as e:
         conn.close()
         return jsonify({"error": f"Database error: {e}"}), 500
-      
 @app.route("/routines/move-to-inactive-sql", methods=["POST"])
 def move_to_inactive_sql():
     """Removes a routine from the active list by deleting its record from routine_schedule."""
@@ -424,7 +408,6 @@ def move_to_inactive_sql():
     except sqlite3.Error as e: 
         conn.close()
         return jsonify({"error": f"Database error: {e}"}), 500
-        
 @app.route("/routines/schedule-update", methods=["POST"])
 def update_routine_schedule():
     """Updates the schedule (day and time) for an active routine in routine_schedule."""
@@ -463,7 +446,101 @@ def update_routine_schedule():
     except sqlite3.Error as e:
         conn.close()
         return jsonify({"error": f"Database error: {e}"}), 500
-       
+        
+@app.route('/api/steps', methods=['POST'])
+def set_steps():
+    """Updates the default step amount on the Arduino."""
+    data = request.json
+    steps = data.get('steps')
+    
+    if steps is None:
+        return jsonify({'message': 'Error: Missing "steps" parameter.'}), 400
+    
+    try:
+        steps = int(steps)
+        if steps <= 0:
+            return jsonify({'message': 'Error: Steps must be positive.'}), 400
+            
+        success = global_controller.update_step_amount(steps)
+        if success:
+            return jsonify({'message': f'Step amount updated to {steps}.'})
+        else:
+            return jsonify({'message': 'Error: Failed to send command. Arduino may be disconnected.'}), 503
+            
+    except ValueError:
+        return jsonify({'message': 'Error: Steps must be an integer.'}), 400
+
+@app.route('/api/connect', methods=['POST'])
+def connect_arduino():
+    """Attempts to connect to the Arduino via serial."""
+    with controller_lock:
+        success = global_controller.connect()
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Connected to Arduino successfully.',
+                'connected': True
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': f'Failed to connect to port {global_controller.port}. Check logs for details.',
+                'connected': False
+            }), 500
+
+@app.route('/api/disconnect', methods=['POST'])
+def disconnect_arduino():
+    """Disconnects from the Arduino serial port."""
+    with controller_lock:
+        global_controller.disconnect()
+        return jsonify({
+            'success': True,
+            'message': 'Disconnected from Arduino.',
+            'connected': False
+        })
+@app.route('/api/status', methods=['GET'])
+def get_status():
+    """Returns the current connection status and step amount."""
+    with controller_lock:
+        status = {
+            'connected': global_controller.is_connected,
+            'current_steps': global_controller.current_steps
+        }
+        return jsonify(status)
+@app.route('/api/motor/<command>', methods=['POST'])
+def send_motor_command(command):
+    """
+    Sends motor movement or utility commands based on the URL path.
+    Supported commands map to StepperController methods.
+    """
+    
+    # Ensure the controller is connected before attempting to send commands
+    if not global_controller.is_connected:
+        return jsonify({'message': 'Error: Arduino not connected. Cannot send command.'}), 503
+
+    # Define command mapping from frontend endpoint to controller method
+    command_map = {
+        'x-forward': (global_controller.move_x, {'forward': True}),
+        'x-backward': (global_controller.move_x, {'forward': False}),
+        'zy-forward': (global_controller.move_zy, {'forward': True}),
+        'zy-backward': (global_controller.move_zy, {'forward': False}),
+        'enable': (global_controller.enable_motors, {}),
+        'disable': (global_controller.disable_motors, {}),
+        'test': (global_controller.test_motors, {})
+    }
+
+    if command not in command_map:
+        return jsonify({'message': f'Error: Unknown command "{command}"'}), 404
+
+    # Execute the corresponding controller method
+    func, args = command_map[command]
+    success = func(**args)
+    
+    if success:
+        return jsonify({'message': f'Command "{command}" sent successfully.'})
+    else:
+        return jsonify({'message': f'Error: Failed to send command "{command}". Serial communication failed.'}), 503
+
 if __name__ == '__main__':
     # Initialize the database *before* running the app
     init_db()

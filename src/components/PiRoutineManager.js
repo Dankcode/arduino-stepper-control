@@ -24,12 +24,8 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [fileToDelete, setFileToDelete] = useState(null);
   const [hasMounted, setHasMounted] = useState(false);
-  
-  // State for locally changing the schedule before saving
   const [localSchedule, setLocalSchedule] = useState({});
-  // Stores the schedule as fetched from the backend for change detection
   const [initialLocalSchedule, setInitialLocalSchedule] = useState({});
-  // State for displaying schedule validation errors
   const [scheduleError, setScheduleError] = useState(null);
 
   // Helper function to generate time options (Kept for reference).
@@ -542,6 +538,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
         .column-title {
             font-size: 1.25rem;
             font-weight: 600;
+            color: #4b5563;
             margin-bottom: 1rem;
             border-bottom: 2px solid #e5e7eb;
             padding-bottom: 0.5rem;
@@ -752,6 +749,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
 
         .period-select { 
             width: 4rem;
+            color: #4b5563;
             padding: 0.25rem;
             border: 1px solid #d1d5db;
             border-radius: 0.375rem;
