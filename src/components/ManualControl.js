@@ -8,7 +8,7 @@ const StepperMotorControl = () => {
   const [loading, setLoading] = useState(false);
 
   // The base URL must match the Flask server configuration
-  const API_BASE = 'http://localhost:5000/api';
+  const API_BASE = 'http://192.168.1.9:5000/api';
 
   // --- API Functions ---
 
