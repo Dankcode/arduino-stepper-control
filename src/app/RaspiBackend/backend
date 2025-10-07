@@ -1,4 +1,5 @@
 from flask import Flask, jsonify, request
+import subprocess
 from flask_cors import CORS
 import os
 import sqlite3 # Import the sqlite3 library
@@ -9,7 +10,7 @@ ROUTINES_DIR = '/home/dank/routines/'
 ACTIVE_ROUTINES_DIR = '/home/dank/active_routines/'
 # Define the path for the SQLite database file
 DATABASE_FILE = '/home/dank/routine_data.db' 
-
+DEFAULT_EXPOSURE_TIME_US = 50000 
 # Simulate an "active" routine.
 # In a real-world application, this would be determined by the state of your hardware
 # or a configuration file. For this example, we'll just hardcode a value.
@@ -521,9 +522,9 @@ def send_motor_command(command):
     # Define command mapping from frontend endpoint to controller method
     command_map = {
         'x-forward': (global_controller.move_x, {'forward': True}),
-        'x-backward': (global_controller.move_x, {'forward': False}),
+        'x-backward': (global_controller.move_x, {'backward': False}),
         'zy-forward': (global_controller.move_zy, {'forward': True}),
-        'zy-backward': (global_controller.move_zy, {'forward': False}),
+        'zy-backward': (global_controller.move_zy, {'backward': False}),
         'enable': (global_controller.enable_motors, {}),
         'disable': (global_controller.disable_motors, {}),
         'test': (global_controller.test_motors, {})
@@ -540,6 +541,65 @@ def send_motor_command(command):
         return jsonify({'message': f'Command "{command}" sent successfully.'})
     else:
         return jsonify({'message': f'Error: Failed to send command "{command}". Serial communication failed.'}), 503
+    
+@app.route('/api/camera/take-picture', methods=['POST'])
+def take_picture_route():
+    """
+    Handles POST requests from the frontend to trigger the camera.py script 
+    for a manual snapshot using a specific exposure time.
+    """
+    try:
+        data = request.get_json() or {}
+        
+        # 1. Set required parameters for camera.py
+        # Use a generic name for manual control snapshots.
+        routine_name = data.get('routine_name', 'ManualControl_Snapshot')
+        
+        # Use the exposure time sent by the user, or fall back to the default
+        # NOTE: Frontend must be updated to send this value.
+        exposure_time = data.get('exposure_time', DEFAULT_EXPOSURE_TIME_US)
+        
+        # Ensure the exposure time is a valid integer
+        try:
+            exposure_time = int(exposure_time)
+            if exposure_time <= 0:
+                 return jsonify({"success": False, "message": "Exposure time must be a positive integer."}), 400
+        except ValueError:
+            return jsonify({"success": False, "message": "Invalid exposure_time parameter. Must be an integer."}), 400
+
+
+        # 2. Construct the subprocess command: python3 camera.py [routine_name] --exposure [time]
+        command = [
+            'python3', 
+            'camera.py', 
+            routine_name,
+            '--exposure', 
+            str(exposure_time)
+        ]
+        
+        # 3. Execute the camera script
+        # IMPORTANT: Ensure camera.py is in the same directory as this backend file.
+        result = subprocess.run(
+            command, 
+            capture_output=True, 
+            text=True, 
+            check=False 
+        )
+
+        # 4. Check the result
+        if result.returncode == 0:
+            return jsonify({
+                "success": True, 
+                "message": f"Picture capture complete. Snapshot saved with {exposure_time} µs exposure.",
+                "output": result.stdout
+            }), 200
+        else:
+            # If the script fails (non-zero exit code), return the stderr
+            error_message = f"Camera script failed (Exit Code {result.returncode}). Error: {result.stderr.strip()}"
+            return jsonify({"success": False, "message": error_message, "output": result.stderr}), 500
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Server-side error: {str(e)}"}), 500
 
 if __name__ == '__main__':
     # Initialize the database *before* running the app

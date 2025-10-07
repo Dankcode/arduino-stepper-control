@@ -6,9 +6,9 @@ const StepperMotorControl = () => {
   const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
-
+  const [manualExposure, setManualExposure] = useState(50000); 
   // The base URL must match the Flask server configuration
-  const API_BASE = 'http://192.168.1.9:5000/api';
+  const API_BASE = 'http://192.168.1.7:5000/api';
 
   // --- API Functions ---
 
@@ -106,6 +106,54 @@ const StepperMotorControl = () => {
       await new Promise(resolve => setTimeout(resolve, 500));
     } catch (error) {
       setMessage(`Failed to send ${endpoint} command`);
+    }
+    setLoading(false);
+  };
+  
+  /**
+   * NEW FUNCTION: Sends a command to the backend to trigger the libcamera picture capture.
+   * Assumes the backend exposes the endpoint POST /api/camera/take-picture
+   */
+  const handleTakePicture = async () => {
+    if (!connected) {
+      setMessage('Arduino not connected. Picture command requires connection.');
+      return;
+    }
+    
+    // Simple validation
+    if (manualExposure <= 0) {
+        setMessage('Error: Exposure time must be greater than zero.');
+        return;
+    }
+
+    setLoading(true);
+    try {
+      // Endpoint: POST /api/camera/take-picture
+      const response = await fetch(`${API_BASE}/camera/take-picture`, {
+        method: 'POST',
+        // 🔑 FIX: This line sets the required Content-Type header.
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            // Send the user-set exposure time
+            exposure_time: manualExposure, 
+            // Send a fixed placeholder name for the save path
+            routine_name: 'ManualControl_Snapshot' 
+        }),
+      });
+      
+      const data = await response.json();
+
+      if (!response.ok) {
+          throw new Error(data.message || 'Picture command failed on the server.');
+      }
+      
+      setMessage(data.message);
+      // Wait a moment for the long-running camera command to complete
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    } catch (error) {
+      setMessage(`Failed to take picture. Error: ${error.message}`);
     }
     setLoading(false);
   };
@@ -338,6 +386,17 @@ const StepperMotorControl = () => {
         .btn-motor.yellow:hover:not(:disabled) {
           background-color: #b45309;
         }
+        
+        /* NEW STYLE for Camera Button */
+        .btn-motor.orange {
+          background-color: #f97316; /* Orange 500 */
+          color: #ffffff;
+          font-weight: 800; /* Make it stand out */
+        }
+        .btn-motor.orange:hover:not(:disabled) {
+          background-color: #ea580c; /* Orange 600 */
+        }
+        /* END NEW STYLE */
 
         .loading-spinner {
           display: inline-block;
@@ -415,7 +474,27 @@ const StepperMotorControl = () => {
             </button>
           </div>
         </div>
-
+        {/* --- NEW EXPOSURE TIME INPUT SECTION --- */}
+        <div className="input-section">
+          <label className="input-label">
+            Camera Exposure Time (µs):
+          </label>
+          <div className="flex-buttons-group">
+            <input
+              type="number"
+              value={manualExposure} 
+              onChange={(e) => setManualExposure(parseInt(e.target.value) || 0)}
+              className="input-field"
+              min="1000"
+            />
+            <button
+              onClick={() => setMessage(`Exposure set to ${manualExposure} µs`)}
+              className="btn btn-update-steps"
+            >
+              Set
+            </button>
+          </div>
+        </div>
         {/* Step Amount Input */}
         <div className="input-section">
           <label className="input-label">
@@ -490,6 +569,16 @@ const StepperMotorControl = () => {
               Disable Motors
             </button>
           </div>
+          
+          {/* NEW BUTTON FOR CAMERA CONTROL */}
+          <button
+            onClick={handleTakePicture}
+            disabled={loading || !connected}
+            className="btn-motor orange"
+          >
+            Take Picture (libcamera) 📸
+          </button>
+          {/* END NEW BUTTON */}
 
           <button
             onClick={() => sendMotorCommand('test')}

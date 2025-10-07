@@ -1,13 +1,17 @@
 import serial
 import threading
 import time
+import logging # Import logging module for better error tracing
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Configuration ---
 # IMPORTANT: Update this to your Arduino's serial port!
 # Common ports: '/dev/ttyACM0' (Linux/Pi), 'COM3' (Windows), '/dev/tty.usbmodemXXXX' (Mac)
-DEFAULT_SERIAL_PORT = '/dev/ttyUSB0'
+DEFAULT_SERIAL_PORT = '/dev/ttyACM0'
 BAUD_RATE = 9600
-SERIAL_TIMEOUT = 1  # Timeout for serial read/write operations
+SERIAL_TIMEOUT = 1.5  # Timeout for serial read/write operations
 
 class StepperController:
     """
@@ -18,25 +22,34 @@ class StepperController:
         self.baud = baud
         self.serial_conn = None
         self.is_connected = False
-        self.current_steps = 0 # Example state: Tracks total steps taken
+        self.current_steps = 400 # Default step value, initialized to 400 for consistency
 
     def connect(self):
         """Initializes the serial connection to the Arduino."""
         if self.is_connected and self.serial_conn:
+            logging.info(f"Already connected to {self.port}.")
             return True, f"Already connected to {self.port}."
         
         try:
+            logging.info(f"Attempting connection to {self.port} at {self.baud} baud...")
             self.serial_conn = serial.Serial(
                 self.port, 
                 self.baud, 
                 timeout=SERIAL_TIMEOUT
             )
             time.sleep(2) # Wait for Arduino to reset after connection
+            
+            # Flush buffers to clear any old data
+            self.serial_conn.flushInput()
+            self.serial_conn.flushOutput()
+            
             self.is_connected = True
+            logging.info(f"Successfully connected to Arduino on {self.port}")
             return True, f"Successfully connected to Arduino on {self.port}"
         except serial.SerialException as e:
             self.is_connected = False
             self.serial_conn = None
+            logging.error(f"Failed to connect on {self.port}. Error: {e}")
             return False, f"Failed to connect on {self.port}. Error: {e}"
 
     def disconnect(self):
@@ -45,66 +58,93 @@ class StepperController:
             self.serial_conn.close()
             self.is_connected = False
             self.serial_conn = None
+            logging.info("Successfully disconnected.")
             return True, "Successfully disconnected."
         return True, "Controller was already disconnected."
 
     def send_command(self, command_str):
-        """Sends a command string to the Arduino and waits for confirmation."""
+        """
+        Sends a command string to the Arduino (e.g., 'X', 'a', 'S400')
+        and waits for the Arduino's response.
+        """
         if not self.is_connected or not self.serial_conn:
+            logging.warning(f"Failed to send command '{command_str}': Controller is not connected.")
             return False, "Controller is not connected."
 
         try:
-            # Send the command followed by a newline character
-            self.serial_conn.write(f"{command_str}\n".encode('utf-8'))
+            # 1. Send Command (The C code expects a newline termination)
+            full_command = f"{command_str}\n"
+            self.serial_conn.write(full_command.encode('utf-8'))
+            logging.info(f"SENT: {command_str}")
             
-            # Wait for a response (e.g., 'OK' or 'ERROR') from the Arduino
+            # 2. Read Response (Blocking read until newline or timeout)
+            # This captures the first line of the Arduino's response, e.g., "Motors enabled\n"
             response = self.serial_conn.readline().decode('utf-8').strip()
             
-            if response == "OK":
-                return True, "Command confirmed by Arduino."
-            else:
-                return False, f"Arduino error: {response}"
+            # 3. Flush the remaining lines (if any) but don't check them.
+            # This prevents the next command from reading old, leftover output.
+            time.sleep(0.1) # Small pause to let the last byte arrive
+            self.serial_conn.flushInput() 
+            
+            # 4. Process Response
+            if not response:
+                logging.error(f"Serial read timeout. No response from Arduino after command: {command_str}")
+                return False, "Serial read timeout. No response from Arduino."
+
+            # Success is determined by receiving ANY response from the Arduino within the timeout
+            logging.info(f"RECEIVED (Confirmation line): {response}")
+            return True, f"Command sent and confirmed by response: {response}"
+                
         except serial.SerialTimeoutException:
+            logging.error(f"Serial read timeout for command: {command_str}")
             return False, "Serial read timeout. No response from Arduino."
         except Exception as e:
+            logging.critical(f"Unexpected Serial communication error for command '{command_str}': {e}")
             return False, f"Serial communication error: {e}"
 
-    # --- Manual Control Methods (Called by Flask Routes) ---
+    # --- Manual Control Methods (Now sending single-character commands) ---
 
     def move_x(self, forward=True):
-        """Moves the X-axis motor."""
-        command = f"MOVE_X{'F' if forward else 'B'}:{self.current_steps}"
+        """Moves the X-axis motor. C commands: 'X' (forward), 'x' (backward)."""
+        command = 'X' if forward else 'x'
+        logging.info(f"Executing: {command} (X-Axis)")
         success, message = self.send_command(command)
-        
-        # If movement is successful, update internal step count (for demonstration)
-        if success:
-            self.current_steps += self.current_steps if forward else -self.current_steps
         return success
 
     def move_zy(self, forward=True):
-        """Moves the Z+Y motors simultaneously."""
-        command = f"MOVE_ZY{'F' if forward else 'B'}:{self.current_steps}"
+        """Moves the Z+Y motors simultaneously. C commands: 'A' (forward), 'a' (backward)."""
+        command = 'A' if forward else 'a'
+        logging.info(f"Executing: {command} (Z+Y-Axes)")
         success, message = self.send_command(command)
         return success
 
     def enable_motors(self):
-        """Enables all stepper motor drivers."""
-        return self.send_command("ENABLE_ALL")[0]
+        """Enables all stepper motor drivers. C command: 'E'."""
+        logging.info("Executing: E (ENABLE_ALL)")
+        return self.send_command("E")[0]
     
     def disable_motors(self):
-        """Disables all stepper motor drivers."""
-        return self.send_command("DISABLE_ALL")[0]
+        """Disables all stepper motor drivers. C command: 'D'."""
+        logging.info("Executing: D (DISABLE_ALL)")
+        return self.send_command("D")[0]
 
     def test_motors(self):
-        """Runs a short test sequence."""
-        return self.send_command("TEST")[0]
+        """Runs a short test sequence. C command: 'T'."""
+        logging.info("Executing: T (TEST)")
+        return self.send_command("T")[0]
     
     def set_steps(self, new_steps):
-        """Sets the step size for the next manual move."""
+        """
+        Sets the step size for the next manual move. 
+        C command: 'S' followed by the integer value (e.g., 'S400').
+        """
         self.current_steps = new_steps
-        # Note: Sending this value to Arduino is optional, depending on your sketch
-        return True
-        
+        command = f"S{new_steps}"
+        logging.info(f"Step size set internally and sent to Arduino: {new_steps}")
+        # Send the command to the Arduino
+        success, message = self.send_command(command)
+        return success
+
 # --- Global Initialization (The objects your backend file imports) ---
 controller_lock = threading.Lock()
 global_controller = StepperController()

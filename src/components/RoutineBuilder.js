@@ -3,7 +3,7 @@ import MergedPlateTable from './MergedPlateTable';
 import { wellSchema } from './plateSchema';
 
 // The base URL for the Raspberry Pi backend.
-const PI_BACKEND_URL = 'http://192.168.1.9:5000';
+const PI_BACKEND_URL = 'http://192.168.1.7:5000';
 
 // Helper function to get row and column counts for a given layout.
 const getLayoutDimensions = (layout) => {
