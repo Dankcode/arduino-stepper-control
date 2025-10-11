@@ -1,263 +1,340 @@
 import os
 import time
-import json
 import sqlite3
 import subprocess
-import argparse # Must be imported for argument parsing
+import argparse 
 from datetime import datetime
 from pathlib import Path
 
+# NEW IMPORTS for Motor Control
+import serial
+import logging
+import sys 
+
 # --- Configuration ---
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Serial Configuration
+DEFAULT_SERIAL_PORT = '/dev/ttyUSB0'
+BAUD_RATE = 9600
+SERIAL_TIMEOUT = 1.5
+
+# General Configuration
 DATABASE_FILE = '/home/dank/routine_data.db'
-ROUTINES_DIR = '/home/dank/routines/'
-# Base directory for all pictures (must match BASE_SAVE_DIR in camera.py)
 SAVED_PICTURES_DIR = Path('/home/dank/saved_pictures') 
-CAMERA_SCRIPT_PATH = 'camera.py' # Path to the camera script
+CAMERA_SCRIPT_PATH = '/home/dank/backend/camera.py' 
 
-# Default step sizes for a 96-well plate 
+# 🚨🚨 DEFAULT MOTOR SETTINGS (Set here for manual adjustment) 🚨🚨
 DEFAULT_X_STEP = 10 
-DEFAULT_Y_STEP = 10
-DEFAULT_EXPOSURE_TIME_US = 50000 # Must be defined here for fallback
+DEFAULT_Y_STEP = 10 # Used for plate switching (Z+Y) and row advance (Y movement)
+DEFAULT_EXPOSURE_TIME_US = 50000 
 
-# --- Stepper Motor Controller Mock/Placeholder ---
+# --- Stepper Motor Controller Class ---
+
 class StepperController:
-    """Mock controller for stepper motor actions."""
-    def __init__(self):
-        print("Motor Controller Initialized (Mock).")
-        self.is_enabled = False
+    """
+    Manages the state and serial communication for the Stepper Motors.
+    """
+    def __init__(self, port=DEFAULT_SERIAL_PORT, baud=BAUD_RATE):
+        self.port = port
+        self.baud = baud
+        self.serial_conn = None
+        self.is_connected = False
+        self.current_steps = 400
+
+    def connect(self):
+        """Initializes the serial connection to the Arduino."""
+        if self.is_connected and self.serial_conn:
+            logging.info(f"Already connected to {self.port}.")
+            return True, f"Already connected to {self.port}."
+        
+        try:
+            logging.info(f"Attempting connection to {self.port}...")
+            self.serial_conn = serial.Serial(self.port, self.baud, timeout=SERIAL_TIMEOUT)
+            time.sleep(2) 
+            self.is_connected = True
+            logging.info(f"Successfully connected to {self.port}.")
+            return True, f"Successfully connected to {self.port}."
+        except serial.SerialException as e:
+            self.is_connected = False
+            logging.error(f"Failed to connect to {self.port}: {e}")
+            return False, f"Failed to connect to {self.port}: {e}"
+
+    def disconnect(self):
+        """Closes the serial connection."""
+        if self.serial_conn and self.is_connected:
+            self.serial_conn.close()
+            self.is_connected = False
+            logging.info("Serial connection closed.")
+            return True
+        return False
+
+    def send_command(self, command: str, wait_for_response=True):
+        """Sends a command to the Arduino and optionally waits for a response."""
+        if not self.is_connected or not self.serial_conn:
+            logging.error(f"Cannot send command '{command}'. Serial connection is not active.")
+            return False, "Connection not active."
+        
+        try:
+            full_command = (command + '\n').encode('ascii')
+            self.serial_conn.write(full_command)
+            logging.debug(f"Command sent: {command}")
+
+            if wait_for_response:
+                response_line = self.serial_conn.readline().decode('ascii').strip()
+                if not response_line:
+                    return False, f"No response received after {command} command (Timeout)."
+                
+                logging.debug(f"Response received: {response_line}")
+                if "OK" in response_line or "Ready" in response_line:
+                    return True, response_line
+                else:
+                    return False, f"Received non-success response: {response_line}"
+            
+            return True, "Command sent (No response expected)."
+
+        except serial.SerialException as e:
+            logging.error(f"Serial error while sending command {command}: {e}")
+            return False, f"Serial error: {e}"
+        except Exception as e:
+            logging.error(f"Unexpected error while sending command {command}: {e}")
+            return False, f"Unexpected error: {e}"
+
+    # --- Motor Action Methods ---
+    # NOTE: The motor commands 'H' (Home X) and 'h' (Home Y) are assumed to exist in the Arduino code.
+
+    def home_x(self):
+        """Homes the X motor to its origin. C command: 'H' (Assumed)."""
+        logging.info("Executing: H (Home X-Axis)")
+        return self.send_command("H")[0]
+
+    def home_y(self):
+        """Homes the Y motor to its origin. C command: 'h' (Assumed)."""
+        logging.info("Executing: h (Home Y-Axis)")
+        return self.send_command("h")[0]
+        
+    def set_steps(self, new_steps):
+        """Sets the step size for the next move. C command: 'S' followed by value (e.g., 'S400')."""
+        self.current_steps = new_steps
+        command = f"S{new_steps}"
+        logging.info(f"Setting step size to: {new_steps}")
+        return self.send_command(command, wait_for_response=True)[0]
+    
+    def move_x(self, forward=True):
+        """Moves the X motor. C commands: 'X' (forward), 'x' (backward)."""
+        command = 'X' if forward else 'x'
+        logging.info(f"Executing: {command} (X-Axis, {self.current_steps} steps)")
+        return self.send_command(command)[0]
+
+    def move_zy(self, forward=True):
+        """Moves the Z+Y motors (or Y only) simultaneously. C commands: 'A' (forward), 'a' (backward)."""
+        command = 'A' if forward else 'a'
+        logging.info(f"Executing: {command} (Z+Y-Axes, {self.current_steps} steps)")
+        return self.send_command(command)[0]
 
     def enable_motors(self):
-        print("ACTION: Motors Enabled.")
-        self.is_enabled = True
-        return True
-
-    def disable_motors(self):
-        print("ACTION: Motors Disabled.")
-        self.is_enabled = False
-        return True
-
-    def move_x(self, steps: int):
-        if not self.is_enabled: 
-            print("ERROR: Motors must be enabled before moving.")
-            return False
-        print(f"ACTION: Moving X axis by {steps} steps.")
-        return True
+        """Enables all stepper motor drivers. C command: 'E'."""
+        logging.info("Executing: E (ENABLE_ALL)")
+        return self.send_command("E")[0]
     
-    def move_y(self, steps: int):
-        if not self.is_enabled: 
-            print("ERROR: Motors must be enabled before moving.")
-            return False
-        print(f"ACTION: Moving Y axis by {steps} steps.")
-        return True
+    def disable_motors(self):
+        """Disables all stepper motor drivers. C command: 'D'."""
+        logging.info("Executing: D (DISABLE_ALL)")
+        return self.send_command("D", wait_for_response=False)[0]
 
+
+# --- Stepper Motor Controller Initialization ---
 controller = StepperController()
 
 
 # --- Utility Functions ---
 
 def get_db_connection():
+    """Establishes a connection to the SQLite database."""
     conn = sqlite3.connect(DATABASE_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
-def get_well_name(row_index, col_index):
-    """Converts zero-based indices (0-7, 0-11) to A1, B2 format."""
-    row_char = chr(ord('A') + row_index)
-    col_num = col_index + 1
-    return f"{row_char}{col_num}"
-
 def run_camera_script_routine(exposure_time: int, output_path: Path):
-    """
-    Calls camera.py in 'routine' mode with the final output path.
-    """
+    """Calls camera.py with the specific exposure time and saves the picture."""
     command = [
-        'python3', 
-        CAMERA_SCRIPT_PATH, 
-        '--mode', 'routine', 
-        '--exposure', str(exposure_time), 
-        '--output-path', str(output_path)
+        'python3', CAMERA_SCRIPT_PATH, '--mode', 'routine', 
+        '--exposure', str(exposure_time), '--output-path', str(output_path)
     ]
     
-    print(f"  -> CAPTURE: Executing camera.py for {output_path.name}")
+    print(f"  -> CAPTURE: Executing camera.py for {output_path.name} @ {exposure_time}s")
     
     try:
-        subprocess.run(
-            command, 
-            capture_output=True, 
-            text=True, 
-            check=True
-        )
+        subprocess.run(command, capture_output=True, text=True, check=True)
         return True
-        
     except subprocess.CalledProcessError as e:
         print(f"  ❌ CAPTURE ERROR: Camera script failed. Stderr:\n{e.stderr.strip()}")
         return False
     except FileNotFoundError:
         print(f"  ❌ CAPTURE ERROR: Python or {CAMERA_SCRIPT_PATH} not found.")
         return False
-        
-# --- Core Routine Logic ---
 
-def run_plate_routine(routine_name: str, quadrant_key: str, quadrant_data: list, 
-                      exposure_time: int, x_step: int = DEFAULT_X_STEP, 
-                      y_step: int = DEFAULT_Y_STEP):
+# --- Core Routine Execution Logic ---
+
+def get_well_row_id(well_id: str) -> str:
+    """Extracts the letter (row ID) from the well ID (e.g., 'B1' -> 'B')."""
+    import re
+    match = re.match(r"([a-zA-Z]+)", well_id)
+    return match.group(0).upper() if match else ''
+
+def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step_unit=DEFAULT_Y_STEP):
     """
-    Executes the well-by-well movement and picture capture for a single plate (quadrant).
-    (Logic remains the same as previous step)
+    Fetches all well details and executes the movement, capture, and delay for each well,
+    implementing complex row/column movement logic.
     """
-    num_rows = len(quadrant_data)
-    if num_rows == 0: return
-    num_cols = len(quadrant_data[0])
-    
-    print(f"\n-- Starting Plate Routine for {routine_name} ({quadrant_key.upper()} - {num_rows}x{num_cols}) --")
-    
-    if not controller.is_enabled:
-        controller.enable_motors()
-
-    # Define the save directory: /saved_pictures/RoutineName_quadrant/2025-10-05/
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    save_dir = SAVED_PICTURES_DIR / f"{routine_name}_{quadrant_key}" / date_str
-    os.makedirs(save_dir, exist_ok=True)
-    print(f"Pictures will be saved to: {save_dir}")
-
-    total_x_steps = 0 
-
-    for r in range(num_rows):
-        print(f"\n--- Starting Row {chr(ord('A') + r)} ---")
-
-        for c in range(num_cols):
-            well_name = get_well_name(r, c)
-            well_params = quadrant_data[r][c]
-            step_time = well_params.get('runtime', 0)
-            
-            if step_time == 0:
-                print(f"  > Skipping well {well_name}: runtime is 0.")
-            else:
-                print(f"  > Processing well {well_name}: runtime={step_time}s")
-                
-                # 1. Take Picture
-                filename = f"{well_name}.jpg"
-                output_path = save_dir / filename
-                run_camera_script_routine(exposure_time, output_path)
-                
-                # 2. Apply runtime delay
-                if step_time > 0:
-                    print(f"  > Delaying for {step_time} seconds...")
-                    time.sleep(step_time)
-
-            # 3. Move to the next well (X-axis)
-            if c < num_cols - 1:
-                if controller.move_x(x_step):
-                    total_x_steps += x_step
-
-        # 4. End of Row: Move X back and move Y down
-        
-        print(f"  <- Returning X axis by {total_x_steps} steps.")
-        controller.move_x(-total_x_steps)
-        total_x_steps = 0 
-
-        if r < num_rows - 1:
-            print(f"  v Moving Y axis down by {y_step} steps for Row {chr(ord('A') + r + 1)}.")
-            controller.move_y(y_step)
-
-    print(f"\n-- Plate Routine for {quadrant_key.upper()} Complete --")
-    
-    # 5. Return Y axis to the start position 
-    total_y_steps_moved = (num_rows - 1) * y_step
-    if total_y_steps_moved > 0:
-        print(f"  ^ Returning Y axis by {total_y_steps_moved} steps.")
-        controller.move_y(-total_y_steps_moved)
-    
-    controller.disable_motors()
-
-
-def execute_single_routine(routine_filename: str, x_step_unit=DEFAULT_X_STEP, y_step_unit=DEFAULT_Y_STEP):
-    """
-    Loads and executes a single routine specified by the routine filename.
-    This is the function called by cronjob.py.
-    """
-    routine_name = routine_filename.replace('.json', '')
-    json_path = Path(ROUTINES_DIR) / routine_filename
     
     print(f"\n--- Single Routine Executor Started for: {routine_name} ---")
 
-    if not json_path.exists():
-        print(f"ERROR: Routine JSON file not found at {json_path}. Aborting.")
-        return
-    
-    try:
-        with open(json_path, 'r') as f:
-            routine_data = json.load(f)
-        
-        exposure_time = routine_data.get('exposureTime', DEFAULT_EXPOSURE_TIME_US)
-        content = routine_data.get('routine_content', {})
-        quadrant_layouts = content.get('quadrantLayouts', {})
-        quadrant_data = content.get('quadrantData', {})
-        
-    except Exception as e:
-        print(f"ERROR: Failed to load/parse routine data for '{routine_name}': {e}. Aborting.")
+    # 0. Connect to Arduino
+    success, message = controller.connect()
+    if not success:
+        print(f"FATAL ERROR: Could not connect to Arduino. Cannot run routine. Message: {message}")
         return
 
-    # Execute the routine for all four quadrants (tl, tr, bl, br)
-    for key in ['tl', 'tr', 'bl', 'br']:
-        layout = quadrant_layouts.get(key)
-        data = quadrant_data.get(key)
-        
-        # Check for valid data structure
-        if layout and layout != 'none' and data and len(data) > 0 and len(data[0]) > 0:
-            
-            run_plate_routine(
-                routine_name=routine_name,
-                quadrant_key=key,
-                quadrant_data=data,
-                exposure_time=exposure_time,
-                x_step=x_step_unit,
-                y_step=y_step_unit
-            )
-        else:
-            print(f"INFO: Quadrant {key.upper()} is skipped (layout is 'none' or no data).")
-            
-    print(f"--- Single Routine Execution for {routine_name} Finished ---")
-
-
-def execute_all_active_routines(x_step_unit=DEFAULT_X_STEP, y_step_unit=DEFAULT_Y_STEP):
-    """
-    Original function to find ALL active routines (kept as a fallback/alternative mode).
-    """
-    print(f"\n--- Fallback: Running ALL Active Routines ---")
-    
+    # 1. Fetch Well Data
+    conn = None
+    well_data_records = []
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT filename FROM routine_status WHERE is_active = 1")
-        active_routines = [row['filename'] for row in cursor.fetchall()]
-        conn.close()
+        
+        query_wells = """
+        SELECT plateNumber, wellId, stepAmount, delayBetweenStep, lightTime, exposureTime, switchPlate 
+        FROM well_data
+        WHERE filename = ?
+        ORDER BY plateNumber ASC, wellId ASC
+        """
+        cursor.execute(query_wells, (routine_name,))
+        well_data_records = cursor.fetchall()
+        
+        if not well_data_records:
+            print(f"ERROR: No well parameters found in database for '{routine_name}'.")
     except sqlite3.Error as e:
-        print(f"ERROR: Database error when fetching active routines: {e}")
-        return
+        print(f"FATAL ERROR: Database error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
-    if not active_routines:
-        print("INFO: No active routines found in the database.")
-        return
+    # 2. Sequential Execution (wrapped in try/finally for motor safety)
+    try:
+        if not well_data_records:
+            return
 
-    for routine_filename in active_routines:
-        # Use the single routine executor for cleanliness
-        execute_single_routine(routine_filename, x_step_unit, y_step_unit)
-    
-    print(f"\n--- Fallback Executor Finished: {datetime.now()} ---")
+        controller.enable_motors() 
+        
+        current_plate = -1
+        current_row_id = ''
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+        for i, record in enumerate(well_data_records):
+            plate_num = record['plateNumber']
+            well_id = record['wellId']
+            
+            new_row_id = get_well_row_id(well_id) 
+
+            # Access columns using [] and handle None
+            step_amount = record['stepAmount'] if record['stepAmount'] is not None else 0
+            # Get delay time, but override if step is 0 (new requirement)
+            delay_time = record['delayBetweenStep'] if record['delayBetweenStep'] is not None else 0
+            exposure_time = record['exposureTime'] if record['exposureTime'] is not None else DEFAULT_EXPOSURE_TIME_US
+            switch_plate = record['switchPlate'] if record['switchPlate'] is not None else 0
+            
+            # --- ROW CHANGE LOGIC (e.g., A1 -> B1) ---
+            if new_row_id != current_row_id and current_row_id != '':
+                print(f"\n--- ROW ADVANCE: Resetting X-Axis for Row {new_row_id} ---")
+                
+                # 1. Reset X-axis back to origin
+                controller.home_x() 
+                
+                # 2. Move Y-axis down by DEFAULT_Y_STEP (using the Z+Y command 'A' since they are parallel)
+                controller.set_steps(DEFAULT_Y_STEP)
+                # Assumed 'move_zy(forward=True)' is the correct direction for 'down'
+                controller.move_zy(forward=True) 
+                
+                current_row_id = new_row_id
+            
+            # --- PLATE CHANGE LOGIC ---
+            if plate_num != current_plate:
+                if current_plate != -1 and switch_plate == 1:
+                    print(f"\n--- PLATE SWITCH: Moving Z+Y for Plate {plate_num} ---")
+                    # Use y_step_unit (from args, defaults to DEFAULT_Y_STEP) for plate change
+                    controller.set_steps(y_step_unit) 
+                    controller.move_zy(forward=True) 
+                
+                print(f"\n--- Starting Routine Execution for Plate {plate_num} / Row {new_row_id} ---")
+                current_plate = plate_num
+                current_row_id = new_row_id
+                
+                # Create save directory
+                plate_key = f"P{plate_num}"
+                save_dir = SAVED_PICTURES_DIR / f"{routine_name}_{plate_key}" / date_str
+                os.makedirs(save_dir, exist_ok=True)
+                print(f"Pictures will be saved to: {save_dir}")
+            elif current_row_id == '':
+                # Initialize row ID on the very first well
+                current_row_id = new_row_id
 
 
+            # --- WELL MOVEMENT LOGIC ---
+            
+            # If stepAmount is 0 or less, use the default X step and set delay to 0
+            if step_amount <= 0:
+                print(f"  ℹ️ INFO: Well {well_id} stepAmount is {step_amount}. Using default {DEFAULT_X_STEP} steps and setting delay to 0.")
+                move_steps = DEFAULT_X_STEP
+                delay_time = 0 # NEW REQUIREMENT: Set delay to 0
+            else:
+                move_steps = step_amount
+                
+            # A. Move to the Well (X-axis movement)
+            controller.set_steps(move_steps)
+            controller.move_x(forward=True)
+                
+            # B. Take Picture
+            filename = f"{well_id}.jpg"
+            output_path = save_dir / filename
+            run_camera_script_routine(exposure_time, output_path)
+
+            # C. Apply Delay
+            if delay_time > 0:
+                print(f"  > Delaying for {delay_time} seconds...")
+                time.sleep(delay_time)
+            
+            print(f"  ✅ Well {plate_num}-{well_id} completed.")
+            
+    except Exception as e:
+        print(f"FATAL ERROR during routine execution: {e}")
+        raise 
+        
+    finally:
+        # 3. Finalization: Reset X and Y to origin and disable motors
+        print(f"\n--- Finalizing Routine: Resetting Motors and Disabling ---")
+        controller.home_x()
+        controller.home_y()
+        controller.disable_motors() 
+        controller.disconnect()
+        print("Motors Disabled. Serial Connection Closed.")
+        print(f"\n--- Single Routine Execution for {routine_name} Finished ---")
+
+
+# --- Main Execution Block ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Execute a specific routine or all active routines.",
+        description="Execute a specific routine by querying the database for its parameters.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     
     parser.add_argument(
         "--routine",
         type=str,
-        default=None,
-        help="The filename of the routine to execute (e.g., 'MyRoutine.json')."
+        required=True,
+        help="The base name of the routine to execute (e.g., 'testshort')."
     )
     
     parser.add_argument(
@@ -271,14 +348,8 @@ if __name__ == "__main__":
         "--ystep",
         type=int,
         default=DEFAULT_Y_STEP,
-        help=f"Y-axis step size. Default: {DEFAULT_Y_STEP}"
+        help=f"Y-axis step size. Default: {DEFAULT_Y_STEP}. Used for plate switching."
     )
 
     args = parser.parse_args()
-
-    if args.routine:
-        # This is the path for the scheduled cronjob
-        execute_single_routine(args.routine, args.xstep, args.ystep)
-    else:
-        # Fallback if the script is run directly without arguments
-        execute_all_active_routines(args.xstep, args.ystep)
+    execute_single_routine(args.routine, args.xstep, args.ystep)

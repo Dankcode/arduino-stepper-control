@@ -1,65 +1,61 @@
-import subprocess
 import sqlite3
+import subprocess
+from datetime import datetime
 import os
 import sys
-from datetime import datetime, timedelta
 
 # --- Configuration ---
-# Path to the routine script that handles motor/camera logic
-ROUTINE_SCRIPT_PATH = 'routine.py' 
-# Path to the database file (must match configuration in 'backend' and 'routine.py')
 DATABASE_FILE = '/home/dank/routine_data.db' 
+# Ensure this path points to the new, separated routine.py file
+ROUTINE_SCRIPT_PATH = '/home/dank/backend/routine.py' 
 
 def get_db_connection():
     """Establishes a connection to the SQLite database."""
+    # This is the correct format and is consistent with backend.py
     conn = sqlite3.connect(DATABASE_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
-def execute_routine_script(routine_filename: str):
+def execute_routine_script(routine_filename_base: str):
     """
-    Calls the routine.py script as a subprocess to execute a specific routine.
-    :param routine_filename: The name of the routine's JSON file (e.g., 'TryptophanAssay.json').
+    Calls the routine.py script as a subprocess to execute a single routine.
+    :param routine_filename_base: The base name of the routine (e.g., 'testshort').
     """
-    print(f"INFO: Triggering routine.py for: {routine_filename}")
+    print(f"INFO: Triggering routine.py for: {routine_filename_base}")
 
-    # Build the command: python3 routine.py --routine TryptophanAssay.json
+    # Command: python3 routine.py --routine <base_filename>
     command = [
         sys.executable, 
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ROUTINE_SCRIPT_PATH),
-        '--routine', routine_filename
+        ROUTINE_SCRIPT_PATH,
+        '--routine', routine_filename_base
     ]
     
     try:
-        # Run the command and capture output. check=True raises CalledProcessError on failure.
+        # Run the command and capture output.
         result = subprocess.run(
             command, 
             capture_output=True, 
             text=True, 
             check=True 
         )
-        print(f"SUCCESS: Routine '{routine_filename}' executed successfully.")
-        # Optionally log the full output
-        # print("Routine Output:\n", result.stdout) 
+        print(f"SUCCESS: Routine '{routine_filename_base}' executed successfully.")
+        print("Routine Output:\n", result.stdout)
         
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: Routine '{routine_filename}' failed (Exit Code {e.returncode}).")
+        print(f"ERROR: Routine '{routine_filename_base}' failed (Exit Code {e.returncode}).")
         print("Routine Stderr:\n", e.stderr)
-        # Log error but continue checking other routines
         
     except FileNotFoundError:
-        print(f"FATAL ERROR: Python or {ROUTINE_SCRIPT_PATH} not found.")
-        
-    # NOTE: In a robust system, you might update a 'last_run' timestamp in the SQL here.
+        print(f"FATAL ERROR: Python or routine.py not found at: {ROUTINE_SCRIPT_PATH}")
+
 
 def run_scheduler_check():
     """
     Checks the database for routines scheduled to run at the current minute.
     """
     now = datetime.now()
-    # Format current time to match common SQLite time format (HH:MM)
     current_time_str = now.strftime("%H:%M")
-    current_weekday = now.strftime("%a") # e.g., 'Mon', 'Tue'
+    current_weekday_int = now.weekday() + 1 # 1=Mon, 7=Sun
     
     print(f"\n--- Scheduler Check Running ({now.strftime('%Y-%m-%d %H:%M:%S')}) ---")
 
@@ -68,29 +64,26 @@ def run_scheduler_check():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Query the schedule table for any routines that:
-        # 1. Have a matching schedule_time (HH:MM)
-        # 2. Are set to run on the current weekday (e.g., 'Mon', 'Daily', 'All')
+        # Query the schedule table
         query = """
         SELECT rs.filename
         FROM routine_schedule rs
-        WHERE rs.schedule_time = ?
-          AND (rs.schedule_days = 'Daily' OR rs.schedule_days LIKE ? OR rs.schedule_days = 'All')
+        WHERE rs.start_time = ?
+          AND rs.schedule_day = ?
         """
         
-        # Note: LIKE checks if the current weekday is within the schedule_days string (e.g., 'Mon,Wed,Fri')
-        cursor.execute(query, (current_time_str, f"%{current_weekday}%"))
+        cursor.execute(query, (current_time_str, current_weekday_int))
         
         routines_to_run = [row['filename'] for row in cursor.fetchall()]
 
         if not routines_to_run:
-            print("INFO: No routines scheduled for this minute.")
+            print("INFO: No routines scheduled for this minute. Exiting check.")
             return
 
-        print(f"INFO: Found {len(routines_to_run)} routine(s) to run at {current_time_str}: {routines_to_run}")
+        print(f"INFO: Found {len(routines_to_run)} routine(s) to run at {current_time_str} on Day {current_weekday_int}: {routines_to_run}")
 
-        for routine_filename in routines_to_run:
-            execute_routine_script(routine_filename)
+        for routine_filename_base in routines_to_run:
+            execute_routine_script(routine_filename_base)
 
     except sqlite3.Error as e:
         print(f"FATAL ERROR: Database error during schedule check: {e}")

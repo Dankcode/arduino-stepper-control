@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # --- Configuration ---
 # IMPORTANT: Update this to your Arduino's serial port!
 # Common ports: '/dev/ttyACM0' (Linux/Pi), 'COM3' (Windows), '/dev/tty.usbmodemXXXX' (Mac)
-DEFAULT_SERIAL_PORT = '/dev/ttyACM0'
+DEFAULT_SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
 SERIAL_TIMEOUT = 1.5  # Timeout for serial read/write operations
 
@@ -132,7 +132,7 @@ class StepperController:
         """Runs a short test sequence. C command: 'T'."""
         logging.info("Executing: T (TEST)")
         return self.send_command("T")[0]
-    
+        
     def set_steps(self, new_steps):
         """
         Sets the step size for the next manual move. 
@@ -148,3 +148,4 @@ class StepperController:
 # --- Global Initialization (The objects your backend file imports) ---
 controller_lock = threading.Lock()
 global_controller = StepperController()
+        
