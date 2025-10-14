@@ -17,9 +17,10 @@ import sys
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Serial Configuration
+# 🚨 Changed to ttyUSB0
 DEFAULT_SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
-SERIAL_TIMEOUT = 1.5
+SERIAL_TIMEOUT = 5.0 
 
 # General Configuration
 DATABASE_FILE = '/home/dank/routine_data.db'
@@ -28,7 +29,7 @@ CAMERA_SCRIPT_PATH = '/home/dank/backend/camera.py'
 
 # 🚨🚨 DEFAULT MOTOR SETTINGS (Set here for manual adjustment) 🚨🚨
 DEFAULT_X_STEP = 10 
-DEFAULT_Y_STEP = 10 # Used for plate switching (Z+Y) and row advance (Y movement)
+DEFAULT_Y_STEP = 10 
 DEFAULT_EXPOSURE_TIME_US = 50000 
 
 # --- Stepper Motor Controller Class ---
@@ -103,15 +104,13 @@ class StepperController:
             return False, f"Unexpected error: {e}"
 
     # --- Motor Action Methods ---
-    # NOTE: The motor commands 'H' (Home X) and 'h' (Home Y) are assumed to exist in the Arduino code.
-
     def home_x(self):
         """Homes the X motor to its origin. C command: 'H' (Assumed)."""
         logging.info("Executing: H (Home X-Axis)")
         return self.send_command("H")[0]
 
     def home_y(self):
-        """Homes the Y motor to its origin. C command: 'h' (Assumed)."""
+        """Homes the Y motor (Z+Y parallel rail) to its origin. C command: 'h' (Assumed)."""
         logging.info("Executing: h (Home Y-Axis)")
         return self.send_command("h")[0]
         
@@ -129,7 +128,7 @@ class StepperController:
         return self.send_command(command)[0]
 
     def move_zy(self, forward=True):
-        """Moves the Z+Y motors (or Y only) simultaneously. C commands: 'A' (forward), 'a' (backward)."""
+        """Moves the Z+Y motors (used for plate switching AND row advance). C commands: 'A' (forward), 'a' (backward)."""
         command = 'A' if forward else 'a'
         logging.info(f"Executing: {command} (Z+Y-Axes, {self.current_steps} steps)")
         return self.send_command(command)[0]
@@ -164,9 +163,11 @@ def run_camera_script_routine(exposure_time: int, output_path: Path):
         '--exposure', str(exposure_time), '--output-path', str(output_path)
     ]
     
-    print(f"  -> CAPTURE: Executing camera.py for {output_path.name} @ {exposure_time}s")
+    # 🚨 Changed µs to us
+    print(f"  -> CAPTURE: Executing camera.py for {output_path.name} @ {exposure_time} us exposure time")
     
     try:
+        # Check=True ensures subprocess.CalledProcessError is raised on non-zero exit code
         subprocess.run(command, capture_output=True, text=True, check=True)
         return True
     except subprocess.CalledProcessError as e:
@@ -187,7 +188,7 @@ def get_well_row_id(well_id: str) -> str:
 def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step_unit=DEFAULT_Y_STEP):
     """
     Fetches all well details and executes the movement, capture, and delay for each well,
-    implementing complex row/column movement logic.
+    implementing row-by-row movement logic with skipping for stepAmount <= 0.
     """
     
     print(f"\n--- Single Routine Executor Started for: {routine_name} ---")
@@ -198,7 +199,7 @@ def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step
         print(f"FATAL ERROR: Could not connect to Arduino. Cannot run routine. Message: {message}")
         return
 
-    # 1. Fetch Well Data
+    # 1. Fetch Well Data (Ordered by plate and then by well ID to ensure A1, A2, B1, B2 sequence)
     conn = None
     well_data_records = []
     try:
@@ -233,7 +234,7 @@ def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step
         current_row_id = ''
         date_str = datetime.now().strftime("%Y-%m-%d")
 
-        for i, record in enumerate(well_data_records):
+        for record in well_data_records:
             plate_num = record['plateNumber']
             well_id = record['wellId']
             
@@ -241,32 +242,16 @@ def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step
 
             # Access columns using [] and handle None
             step_amount = record['stepAmount'] if record['stepAmount'] is not None else 0
-            # Get delay time, but override if step is 0 (new requirement)
             delay_time = record['delayBetweenStep'] if record['delayBetweenStep'] is not None else 0
             exposure_time = record['exposureTime'] if record['exposureTime'] is not None else DEFAULT_EXPOSURE_TIME_US
             switch_plate = record['switchPlate'] if record['switchPlate'] is not None else 0
             
-            # --- ROW CHANGE LOGIC (e.g., A1 -> B1) ---
-            if new_row_id != current_row_id and current_row_id != '':
-                print(f"\n--- ROW ADVANCE: Resetting X-Axis for Row {new_row_id} ---")
-                
-                # 1. Reset X-axis back to origin
-                controller.home_x() 
-                
-                # 2. Move Y-axis down by DEFAULT_Y_STEP (using the Z+Y command 'A' since they are parallel)
-                controller.set_steps(DEFAULT_Y_STEP)
-                # Assumed 'move_zy(forward=True)' is the correct direction for 'down'
-                controller.move_zy(forward=True) 
-                
-                current_row_id = new_row_id
-            
-            # --- PLATE CHANGE LOGIC ---
+            # --- PLATE CHANGE LOGIC (Higher priority than row change) ---
             if plate_num != current_plate:
                 if current_plate != -1 and switch_plate == 1:
                     print(f"\n--- PLATE SWITCH: Moving Z+Y for Plate {plate_num} ---")
-                    # Use y_step_unit (from args, defaults to DEFAULT_Y_STEP) for plate change
                     controller.set_steps(y_step_unit) 
-                    controller.move_zy(forward=True) 
+                    controller.move_zy(forward=True) # Z+Y movement for plate change
                 
                 print(f"\n--- Starting Routine Execution for Plate {plate_num} / Row {new_row_id} ---")
                 current_plate = plate_num
@@ -277,31 +262,41 @@ def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step
                 save_dir = SAVED_PICTURES_DIR / f"{routine_name}_{plate_key}" / date_str
                 os.makedirs(save_dir, exist_ok=True)
                 print(f"Pictures will be saved to: {save_dir}")
-            elif current_row_id == '':
-                # Initialize row ID on the very first well
+            
+            # --- ROW CHANGE LOGIC (e.g., A1 -> B1) ---
+            if new_row_id != current_row_id:
+                print(f"\n--- ROW ADVANCE: Resetting X-Axis for Row {new_row_id} ---")
+                
+                # 1. Reset X-axis back to origin
+                controller.home_x() 
+                
+                # 2. Move Z+Y axis down by DEFAULT_Y_STEP
+                # Row advance is always 10 steps down (using DEFAULT_Y_STEP), as requested.
+                controller.set_steps(DEFAULT_Y_STEP)
+                controller.move_zy(forward=True) 
+                
                 current_row_id = new_row_id
 
 
-            # --- WELL MOVEMENT LOGIC ---
+            # --- WELL MOVEMENT/SKIPPING LOGIC ---
             
-            # If stepAmount is 0 or less, use the default X step and set delay to 0
-            if step_amount <= 0:
-                print(f"  ℹ️ INFO: Well {well_id} stepAmount is {step_amount}. Using default {DEFAULT_X_STEP} steps and setting delay to 0.")
-                move_steps = DEFAULT_X_STEP
-                delay_time = 0 # NEW REQUIREMENT: Set delay to 0
-            else:
-                move_steps = step_amount
-                
             # A. Move to the Well (X-axis movement)
-            controller.set_steps(move_steps)
-            controller.move_x(forward=True)
+            if step_amount > 0:
+                # Set steps based on the well's stepAmount (this is the distance to the *next* well)
+                controller.set_steps(step_amount)
+                controller.move_x(forward=True)
+                print(f"  ➡️ Moved X-Axis by {step_amount} steps to Well {well_id}")
+            else:
+                # If stepAmount is 0 or less, the well is skipped and no movement is executed for X.
+                print(f"  ⏭️ Skipping X-axis move for Well {well_id} (stepAmount: {step_amount}).")
                 
-            # B. Take Picture
+            
+            # B. Take Picture (accounts for exposure time check)
             filename = f"{well_id}.jpg"
             output_path = save_dir / filename
             run_camera_script_routine(exposure_time, output_path)
 
-            # C. Apply Delay
+            # C. Apply Delay (accounts for SQL delay)
             if delay_time > 0:
                 print(f"  > Delaying for {delay_time} seconds...")
                 time.sleep(delay_time)
@@ -313,8 +308,8 @@ def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step
         raise 
         
     finally:
-        # 3. Finalization: Reset X and Y to origin and disable motors
-        print(f"\n--- Finalizing Routine: Resetting Motors and Disabling ---")
+        # 3. Finalization: Reset X and Y (Z+Y) to origin and disable motors
+        print(f"\n--- Finalizing Routine: Resetting Motors and Disabling ---\n")
         controller.home_x()
         controller.home_y()
         controller.disable_motors() 
