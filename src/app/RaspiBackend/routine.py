@@ -17,17 +17,16 @@ import sys
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Serial Configuration
-# 🚨 Changed to ttyUSB0
+# ?? Changed to ttyUSB0
 DEFAULT_SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
-SERIAL_TIMEOUT = 5.0 
-
+SERIAL_TIMEOUT = 1.5 
 # General Configuration
 DATABASE_FILE = '/home/dank/routine_data.db'
 SAVED_PICTURES_DIR = Path('/home/dank/saved_pictures') 
 CAMERA_SCRIPT_PATH = '/home/dank/backend/camera.py' 
 
-# 🚨🚨 DEFAULT MOTOR SETTINGS (Set here for manual adjustment) 🚨🚨
+# ???? DEFAULT MOTOR SETTINGS (Set here for manual adjustment) ????
 DEFAULT_X_STEP = 10 
 DEFAULT_Y_STEP = 10 
 DEFAULT_EXPOSURE_TIME_US = 50000 
@@ -147,7 +146,6 @@ class StepperController:
 # --- Stepper Motor Controller Initialization ---
 controller = StepperController()
 
-
 # --- Utility Functions ---
 
 def get_db_connection():
@@ -163,7 +161,7 @@ def run_camera_script_routine(exposure_time: int, output_path: Path):
         '--exposure', str(exposure_time), '--output-path', str(output_path)
     ]
     
-    # 🚨 Changed µs to us
+    # ?? Changed  us
     print(f"  -> CAPTURE: Executing camera.py for {output_path.name} @ {exposure_time} us exposure time")
     
     try:
@@ -171,10 +169,10 @@ def run_camera_script_routine(exposure_time: int, output_path: Path):
         subprocess.run(command, capture_output=True, text=True, check=True)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"  ❌ CAPTURE ERROR: Camera script failed. Stderr:\n{e.stderr.strip()}")
+        print(f"  ? CAPTURE ERROR: Camera script failed. Stderr:\n{e.stderr.strip()}")
         return False
     except FileNotFoundError:
-        print(f"  ❌ CAPTURE ERROR: Python or {CAMERA_SCRIPT_PATH} not found.")
+        print(f"  ? CAPTURE ERROR: Python or {CAMERA_SCRIPT_PATH} not found.")
         return False
 
 # --- Core Routine Execution Logic ---
@@ -245,12 +243,12 @@ def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step
             delay_time = record['delayBetweenStep'] if record['delayBetweenStep'] is not None else 0
             exposure_time = record['exposureTime'] if record['exposureTime'] is not None else DEFAULT_EXPOSURE_TIME_US
             switch_plate = record['switchPlate'] if record['switchPlate'] is not None else 0
-            
+            controller.set_steps(100)
             # --- PLATE CHANGE LOGIC (Higher priority than row change) ---
             if plate_num != current_plate:
                 if current_plate != -1 and switch_plate == 1:
                     print(f"\n--- PLATE SWITCH: Moving Z+Y for Plate {plate_num} ---")
-                    controller.set_steps(y_step_unit) 
+                    
                     controller.move_zy(forward=True) # Z+Y movement for plate change
                 
                 print(f"\n--- Starting Routine Execution for Plate {plate_num} / Row {new_row_id} ---")
@@ -272,23 +270,22 @@ def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step
                 
                 # 2. Move Z+Y axis down by DEFAULT_Y_STEP
                 # Row advance is always 10 steps down (using DEFAULT_Y_STEP), as requested.
-                controller.set_steps(DEFAULT_Y_STEP)
+                
                 controller.move_zy(forward=True) 
                 
                 current_row_id = new_row_id
-
 
             # --- WELL MOVEMENT/SKIPPING LOGIC ---
             
             # A. Move to the Well (X-axis movement)
             if step_amount > 0:
                 # Set steps based on the well's stepAmount (this is the distance to the *next* well)
-                controller.set_steps(step_amount)
-                controller.move_x(forward=True)
-                print(f"  ➡️ Moved X-Axis by {step_amount} steps to Well {well_id}")
+                
+                controller.move_x(forward=False)
+                print(f"  ?? Moved X-Axis by {step_amount} steps to Well {well_id}")
             else:
                 # If stepAmount is 0 or less, the well is skipped and no movement is executed for X.
-                print(f"  ⏭️ Skipping X-axis move for Well {well_id} (stepAmount: {step_amount}).")
+                print(f"  ?? Skipping X-axis move for Well {well_id} (stepAmount: {step_amount}).")
                 
             
             # B. Take Picture (accounts for exposure time check)
@@ -301,7 +298,7 @@ def execute_single_routine(routine_name: str, x_step_unit=DEFAULT_X_STEP, y_step
                 print(f"  > Delaying for {delay_time} seconds...")
                 time.sleep(delay_time)
             
-            print(f"  ✅ Well {plate_num}-{well_id} completed.")
+            print(f"  ? Well {plate_num}-{well_id} completed.")
             
     except Exception as e:
         print(f"FATAL ERROR during routine execution: {e}")
@@ -347,4 +344,4 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    execute_single_routine(args.routine, args.xstep, args.ystep)
+    execute_single_routine(args.routine, args.xstep, args.ystep)           
