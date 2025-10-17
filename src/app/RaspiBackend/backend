@@ -1,13 +1,17 @@
-from flask import Flask, jsonify, request
-import subprocess
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
+import subprocess
 import os
 import sqlite3 # Import the sqlite3 library
 from datetime import datetime, timedelta 
 from manual_control import StepperController, global_controller, controller_lock
+import zipfile
+from urllib.parse import unquote
+import io
 
 ROUTINES_DIR = '/home/dank/routines/'
 ACTIVE_ROUTINES_DIR = '/home/dank/active_routines/'
+PICTURES_DIR = '/home/dank/saved_pictures'
 # Define the path for the SQLite database file
 DATABASE_FILE = '/home/dank/routine_data.db' 
 DEFAULT_EXPOSURE_TIME_US = 50000 
@@ -158,7 +162,21 @@ def find_routine_file(filename):
 def get_routine_name_from_active_filename(active_filename):
     # ... (existing code)
     pass # Placeholder to indicate existing functions are not repeated
-
+    
+def get_file_details(file_path):
+    """
+    Returns file details like size and last modified time.
+    """
+    try:
+        stat_info = os.stat(file_path)
+        return {
+            'size': stat_info.st_size,
+            'last_modified': stat_info.st_mtime
+        }
+    except Exception as e:
+        print(f"Error getting file details for {file_path}: {str(e)}")
+        return {'size': 0, 'last_modified': 0}
+        
 @app.route('/', methods=['GET'])
 def check_connection():
     """
@@ -449,27 +467,21 @@ def update_routine_schedule():
         return jsonify({"error": f"Database error: {e}"}), 500
         
 @app.route('/api/steps', methods=['POST'])
-def set_steps():
-    """Updates the default step amount on the Arduino."""
-    data = request.json
-    steps = data.get('steps')
-    
-    if steps is None:
-        return jsonify({'message': 'Error: Missing "steps" parameter.'}), 400
-    
+def update_steps():
+    """Updates the internal step amount and sends it to the Arduino."""
+    data = request.get_json()
     try:
-        steps = int(steps)
-        if steps <= 0:
-            return jsonify({'message': 'Error: Steps must be positive.'}), 400
-            
-        success = global_controller.update_step_amount(steps)
+        steps = int(data.get('steps'))
+    except (TypeError, ValueError):
+        return jsonify({'message': 'Error: Invalid steps value provided.'}), 400
+
+    with controller_lock:
+        # FIX: Changed 'update_step_amount' to 'set_steps' to match manual_control.py
+        success = global_controller.set_steps(steps) 
         if success:
-            return jsonify({'message': f'Step amount updated to {steps}.'})
+            return jsonify({'message': f'Step amount updated to {steps} and sent to Arduino.'})
         else:
-            return jsonify({'message': 'Error: Failed to send command. Arduino may be disconnected.'}), 503
-            
-    except ValueError:
-        return jsonify({'message': 'Error: Steps must be an integer.'}), 400
+            return jsonify({'message': f'Error: Failed to send new step amount to Arduino. Check connection.'}), 503
 
 @app.route('/api/connect', methods=['POST'])
 def connect_arduino():
@@ -522,9 +534,9 @@ def send_motor_command(command):
     # Define command mapping from frontend endpoint to controller method
     command_map = {
         'x-forward': (global_controller.move_x, {'forward': True}),
-        'x-backward': (global_controller.move_x, {'backward': False}),
+        'x-backward': (global_controller.move_x, {'forward': False}),
         'zy-forward': (global_controller.move_zy, {'forward': True}),
-        'zy-backward': (global_controller.move_zy, {'backward': False}),
+        'zy-backward': (global_controller.move_zy, {'forward': False}),
         'enable': (global_controller.enable_motors, {}),
         'disable': (global_controller.disable_motors, {}),
         'test': (global_controller.test_motors, {})
@@ -541,7 +553,7 @@ def send_motor_command(command):
         return jsonify({'message': f'Command "{command}" sent successfully.'})
     else:
         return jsonify({'message': f'Error: Failed to send command "{command}". Serial communication failed.'}), 503
-    
+
 @app.route('/api/camera/take-picture', methods=['POST'])
 def take_picture_route():
     """
@@ -557,7 +569,7 @@ def take_picture_route():
         
         # Use the exposure time sent by the user, or fall back to the default
         # NOTE: Frontend must be updated to send this value.
-        exposure_time = data.get('exposure_time', DEFAULT_EXPOSURE_TIME_US)
+        exposure_time = DEFAULT_EXPOSURE_TIME_US
         
         # Ensure the exposure time is a valid integer
         try:
@@ -590,7 +602,7 @@ def take_picture_route():
         if result.returncode == 0:
             return jsonify({
                 "success": True, 
-                "message": f"Picture capture complete. Snapshot saved with {exposure_time} µs exposure.",
+                "message": f"Picture capture complete. Snapshot saved with {exposure_time} exposure.",
                 "output": result.stdout
             }), 200
         else:
@@ -601,6 +613,157 @@ def take_picture_route():
     except Exception as e:
         return jsonify({"success": False, "message": f"Server-side error: {str(e)}"}), 500
 
+@app.route("/pictures", methods=["GET"])
+def get_saved_pictures():
+    """
+    Scans a specific directory (determined by the 'path' query parameter) 
+    within PICTURES_DIR and returns a list of files and folders.
+    """
+    # Get the desired relative path from the query string, default to root ('')
+    # Use request.args.get with type=str to preserve the full URL-encoded string
+    relative_path = unquote(request.args.get('path', '', type=str))
+    
+    # Sanitize the path to prevent directory traversal attacks
+    normalized_path = os.path.normpath(relative_path) if relative_path else ''
+    
+    # Join the base directory with the normalized path
+    current_dir = os.path.join(PICTURES_DIR, normalized_path)
+    
+    # Safety check: ensure we're still within PICTURES_DIR
+    try:
+        real_current = os.path.realpath(current_dir)
+        real_pictures = os.path.realpath(PICTURES_DIR)
+        if not real_current.startswith(real_pictures):
+            return jsonify({"error": "Access denied: Path outside pictures directory"}), 403
+    except Exception as e:
+        return jsonify({"error": f"Path validation failed: {str(e)}"}), 400
+
+    # 1. Validation and Creation Check
+    if not os.path.isdir(current_dir):
+        # If the path is not the root and is invalid
+        if normalized_path != '':
+            return jsonify({"error": f"Directory not found: {normalized_path}"}), 404
+            
+        # If it's the root and doesn't exist, create it
+        try:
+            os.makedirs(current_dir, exist_ok=True)
+            return jsonify({
+                "message": f"Pictures directory '{current_dir}' was missing but has been created.",
+                "currentPath": '',
+                "contents": []
+            }), 200
+        except OSError as e:
+            return jsonify({"error": f"Pictures directory creation failed: {str(e)}"}), 500
+
+    # 2. List Contents
+    file_list = []
+    try:
+        # List all files and directories in the current path
+        for item_name in os.listdir(current_dir):
+            # Skip hidden files/folders
+            if item_name.startswith('.'):
+                continue
+            
+            full_path = os.path.join(current_dir, item_name)
+            is_dir = os.path.isdir(full_path)
+            
+            # Only get details for files; folders just need their name/type
+            details = get_file_details(full_path) if not is_dir else {}
+
+            file_list.append({
+                'name': item_name,
+                'is_folder': is_dir,
+                'size': details.get('size'),
+                'last_modified': details.get('last_modified')
+            })
+    except PermissionError:
+        return jsonify({"error": f"Permission denied accessing: {current_dir}"}), 403
+    except Exception as e:
+        return jsonify({"error": f"Error listing directory contents: {str(e)}"}), 500
+
+    # 3. Sort contents (Folders first, then by name)
+    file_list.sort(key=lambda x: (not x['is_folder'], x['name'].lower()))
+
+    # 4. Return the structured response
+    return jsonify({
+        "currentPath": normalized_path,
+        "contents": file_list
+    }), 200
+    
+@app.route("/pictures/download", methods=["GET"])
+def download_pictures_folder():
+    """
+    Downloads a folder as a ZIP file.
+    Query parameter 'path' specifies which folder to download.
+    """
+    relative_path = unquote(request.args.get('path', ''))
+    
+    if not relative_path:
+        return jsonify({"error": "No path specified"}), 400
+    
+    # Sanitize the path to prevent directory traversal attacks
+    normalized_path = os.path.normpath(relative_path)
+    current_dir = os.path.join(PICTURES_DIR, normalized_path)
+    
+    # Safety check: ensure we're still within PICTURES_DIR
+    try:
+        real_current = os.path.realpath(current_dir)
+        real_pictures = os.path.realpath(PICTURES_DIR)
+        if not real_current.startswith(real_pictures):
+            return jsonify({"error": "Access denied: Path outside pictures directory"}), 403
+    except Exception as e:
+        return jsonify({"error": f"Path validation failed: {str(e)}"}), 400
+    
+    # Validate the directory exists
+    if not os.path.isdir(current_dir):
+        return jsonify({"error": f"Directory not found: {normalized_path}"}), 404
+    
+    try:
+        # Create ZIP file in memory
+        zip_buffer = io.BytesIO()
+        file_count = 0
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Walk through all files and subdirectories
+            for root, dirs, files in os.walk(current_dir):
+                print(f"Walking: {root}, files: {len(files)}")
+                for file in files:
+                    # Skip hidden files
+                    if file.startswith('.'):
+                        continue
+                    
+                    try:
+                        file_path = os.path.join(root, file)
+                        # Calculate the archive name (relative path within the ZIP)
+                        arcname = os.path.relpath(file_path, current_dir)
+                        print(f"Adding to ZIP: {file_path} as {arcname}")
+                        zip_file.write(file_path, arcname)
+                        file_count += 1
+                    except Exception as file_err:
+                        print(f"Error adding file {file}: {str(file_err)}")
+                        continue
+        
+        print(f"ZIP creation complete. Files added: {file_count}")
+        zip_buffer.seek(0)
+        folder_name = os.path.basename(current_dir) or 'pictures'
+        
+        return send_file(
+            zip_buffer,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f'{folder_name}.zip'
+        )
+    
+    except PermissionError:
+        print(f"Permission denied: {current_dir}")
+        return jsonify({"error": f"Permission denied accessing: {current_dir}"}), 403
+    except Exception as e:
+        print(f"ZIP creation error: {str(e)}")
+        print(f"Current dir: {current_dir}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to create ZIP: {str(e)}"}), 500
+        
 if __name__ == '__main__':
     # Initialize the database *before* running the app
     init_db()

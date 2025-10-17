@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import StepperMotorControl from '../components/ManualControl'; 
 import RoutineBuilder from '../components/RoutineBuilder'; 
 import PiRoutineManager from '../components/PiRoutineManager'; 
+import PictureBrowser from '../components/PictureBrowser';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('routine');
@@ -39,7 +40,7 @@ export default function Home() {
 
   useEffect(() => {
     checkConnectionAndFetchData();
-  }, []); // Empty dependency array ensures this runs once on mount
+  }, [activeTab]);
 
   const getStatusIndicatorClass = () => {
     if (connectionStatus === 'Connected') {
@@ -77,6 +78,8 @@ export default function Home() {
           display: flex;
           flex-direction: column;
           align-items: center;
+          /* FIX: To make the sticky element work within the wrapper, its width must be restricted */
+          max-width: 72rem; 
         }
 
         .main-title {
@@ -137,10 +140,21 @@ export default function Home() {
         .tab-section {
           margin-bottom: 1.5rem;
           width: 100%;
+          /* MODIFICATION: Add styles for a sticky navbar */
+          position: sticky;
+          top: 0; /* Stick to the top of the viewport */
+          z-index: 50; /* Ensure it stays above other content */
+          background-color: #e0e0e0; /* Add background to cover content when sticky */
+          padding-top: 1rem; /* Add padding to lift it off the edge */
+          padding-bottom: 0; /* Remove bottom padding as border container adds space */
+          margin-bottom: 0; /* Remove margin to stick better */
         }
 
         .tab-border-container {
           border-bottom: 1px solid #e2e8f0;
+          background-color: #ffffff; /* Add white background for the tab bar itself */
+          padding: 0 1rem; /* Add horizontal padding to look clean */
+          border-radius: 0.5rem 0.5rem 0 0;
         }
 
         .tab-nav {
@@ -243,12 +257,12 @@ export default function Home() {
         }
       `}</style>
 
-      <div className="connection-status-box">
-        Connection:
-        <span className={getStatusIndicatorClass()} />
-        {connectionStatus}
-      </div>
-      <div className="tab-section">
+<div className="connection-status-box">
+  <div className={getStatusIndicatorClass()}></div>
+  {connectionStatus}
+</div>
+
+<div className="tab-section">
         <div className="tab-border-container">
           <nav className="tab-nav">
             <button
@@ -269,6 +283,13 @@ export default function Home() {
             >
               Pi Routines
             </button>
+            {/* 4. NEW TAB BUTTON */}
+            <button
+              onClick={() => setActiveTab('pictures')}
+              className={`tab-button ${activeTab === 'pictures' ? 'active' : 'inactive'}`}
+            >
+              Pictures
+            </button>
           </nav>
         </div>
       </div>
@@ -280,6 +301,12 @@ export default function Home() {
           connectionStatus={connectionStatus}
           PI_BACKEND_URL={PI_BACKEND_URL}
         />
+      )}
+      {/* 5. NEW TAB CONTENT */}
+      {activeTab === 'pictures' && (
+          <PictureBrowser
+              PI_BACKEND_URL={PI_BACKEND_URL}
+          />
       )}
     </div>
   );
