@@ -2,467 +2,634 @@ import os
 import time
 import sqlite3
 import subprocess
-import argparse
+import argparse 
 from datetime import datetime
 from pathlib import Path
-
-# NEW IMPORTS for Motor Control
 import serial
 import logging
-import sys
+import sys 
 
-# --- Configuration ---
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
 # Logging setup
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # Serial Configuration
 DEFAULT_SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
-SERIAL_TIMEOUT = 1.5
+SERIAL_TIMEOUT = 1.5 
 
-# General Configuration
-# Placeholder values for environment paths
+# File paths
 DATABASE_FILE = '/home/dank/routine_data.db'
-SAVED_PICTURES_DIR = Path('/home/dank/saved_pictures')
-CAMERA_SCRIPT_PATH = '/home/dank/backend/camera.py'
+SAVED_PICTURES_DIR = Path('/home/dank/saved_pictures') 
+CAMERA_SCRIPT_PATH = '/home/dank/backend/camera.py' 
 
-# 🚨🚨 DEFAULT MOTOR SETTINGS 🚨🚨
-DEFAULT_X_STEP = 10  # Steps between wells in X direction
-DEFAULT_Y_STEP = 10  # Steps between rows in Y direction
+# Motor Configuration
+DEFAULT_X_STEP = 10          # Steps between columns
+DEFAULT_Y_STEP = 10          # Steps between rows
 DEFAULT_EXPOSURE_TIME_US = 50000
 
-# --- Database and Routine Parameter Functions (MOCK) ---
+
+# ============================================================================
+# DATABASE FUNCTIONS
+# ============================================================================
+
+def get_db_connection():
+    """Establish connection to SQLite database."""
+    conn = sqlite3.connect(DATABASE_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 
 def fetch_routine_data(routine_name):
-    """Mocks fetching routine parameters from the database. Replace with actual DB logic."""
-    logging.info(f"MOCK: Fetching parameters for routine: {routine_name}")
-    # Returns example parameters required by the scanning function
+    """
+    Fetch routine metadata from database.
+    
+    Returns:
+        dict: Contains num_wells_x (12) and num_wells_y (8)
+    """
+    logging.info(f"Fetching routine data: {routine_name}")
     return {
-        'num_wells_x': 12,  # Number of columns
-        'num_wells_y': 8,   # Number of rows
+        'num_wells_x': 12,
+        'num_wells_y': 8,
         'description': f"Data for {routine_name}"
     }
 
-def fetch_well_scan_map(routine_name, num_wells_y, num_wells_x):
+
+def fetch_wells_to_scan(routine_name, plate_number=1):
     """
-    Mocks fetching a boolean map indicating which wells need scanning.
-    True = Scan, False = Skip.
-
-    Example Map (skips A2, A3, B-row, E-row):
-    - Row A: [T, F, F, T, T, T, T, T, T, T, T, T]
-    - Row B: [F, F, F, F, F, F, F, F, F, F, F, F] (Entire row skipped)
-    - Row C: [T, T, T, T, T, T, T, T, T, T, T, T]
-    ...
+    Fetch wells to scan from database.
+    
+    Wells with stepAmount = 0 are skipped (filtered out).
+    
+    Args:
+        routine_name (str): Filename of the routine
+        plate_number (int): Plate number to scan
+        
+    Returns:
+        set: Well IDs to scan (e.g., {'A1', 'A2', 'B5'})
     """
-    logging.info(f"MOCK: Fetching well scan map for {routine_name}")
-
-    # Generate a map where most are True, but introduce skips for demonstration
-    scan_map = []
-    for r in range(num_wells_y):
-        row_map = [True] * num_wells_x
-        row_letter = chr(65 + r)
-        
-        # Example: Skip A2, A3
-        if row_letter == 'A':
-            row_map[1] = False # A2
-            row_map[2] = False # A3
-        # Example: Skip entire Row B
-        elif row_letter == 'B':
-            row_map = [False] * num_wells_x
-        # Example: Skip E6, E7
-        elif row_letter == 'E':
-            row_map[5] = False # E6
-            row_map[6] = False # E7
-            
-        scan_map.append(row_map)
-        
-    return scan_map
-
-def capture_well_image(well_id, exposure_time_us=DEFAULT_EXPOSURE_TIME_US):
-    """Captures an image of the current well and saves it with the well ID."""
     try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        image_filename = f"{well_id}_{timestamp}.jpg"
-        image_path = SAVED_PICTURES_DIR / image_filename
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT wellId FROM well_data
+            WHERE filename = ? AND plateNumber = ? AND stepAmount != 0
+        """, (routine_name, plate_number))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        wells = {row['wellId'] for row in rows}
+        logging.info(
+            f"Fetched {len(wells)} wells for routine '{routine_name}', plate {plate_number}"
+        )
+        
+        return wells
+        
+    except sqlite3.Error as e:
+        logging.error(f"Database error: {e}")
+        return set()
 
-        # Ensure the pictures directory exists
-        SAVED_PICTURES_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Call the camera script with well ID and exposure time
+# ============================================================================
+# CAMERA FUNCTIONS (in routine.py)
+# ============================================================================
+
+def capture_well_image(routine_name, well_id, exposure_time_us=DEFAULT_EXPOSURE_TIME_US):
+    """
+    Capture image of a well using the camera script.
+    
+    Args:
+        routine_name (str): The name of the routine (used for subdirectory)
+        well_id (str): Well identifier (e.g., 'A1')
+        exposure_time_us (int): Exposure time in microseconds
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # --- Construct the required file path ---
+        date_today = datetime.now().strftime("%Y-%m-%d") # Format: 2025-10-19
+        
+        # New directory: /home/dank/saved_pictures/routine_name/2025-10-19
+        well_save_dir = SAVED_PICTURES_DIR / routine_name / date_today
+        
+        # New filename format: A1.jpg, B12.jpg
+        image_filename = f"{well_id}.jpg" 
+        image_path = well_save_dir / image_filename
+        
+        # Create directory if it doesn't exist (important before calling camera.py)
+        well_save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # --- Execute camera script with the full path ---
         command = [
             'python', CAMERA_SCRIPT_PATH,
-            '--well_id', well_id,
-            '--exposure_us', str(exposure_time_us),
-            '--output', str(image_path)
+            '--mode', 'routine',                                # Set routine mode
+            '--exposure', str(exposure_time_us),
+            '--output-path', str(image_path)                    # Pass the full, correct path
         ]
-
-        logging.info(f"Capturing image for well {well_id}...")
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
-
+        
+        logging.info(f"Capturing image for well {well_id} to: {image_path.relative_to(SAVED_PICTURES_DIR)}...")
+        result = subprocess.run(
+            command, 
+            capture_output=True, 
+            text=True, 
+            timeout=30,
+            # close_fds=True # Optional, often default, but can help
+        )
+        
         if result.returncode == 0:
-            logging.info(f"Successfully captured image for well {well_id}: {image_path}")
+            logging.info(f"Successfully captured and saved: {image_path}")
             return True
         else:
-            logging.error(f"Camera script failed for well {well_id}: {result.stderr}")
+            logging.error(f"Camera failed for {well_id}: {result.stderr}")
             return False
-
+            
     except subprocess.TimeoutExpired:
-        logging.error(f"Camera script timeout for well {well_id}.")
+        logging.error(f"Camera timeout for {well_id}")
         return False
     except Exception as e:
-        logging.error(f"Error capturing image for well {well_id}: {e}")
+        logging.error(f"Error capturing {well_id}: {e}")
         return False
 
+# ============================================================================
+# WELL POSITION FUNCTIONS
+# ============================================================================
+
 def well_id_from_position(row, col):
-    """Converts row and column indices to well ID (e.g., A1, A2, ..., H12)."""
-    row_letter = chr(65 + row)  # Convert row index to letter (A-H)
-    well_number = col + 1  # Column index to 1-based well number
+    """
+    Convert row and column indices to well ID.
+    
+    Args:
+        row (int): Row index (0-7)
+        col (int): Column index (0-11)
+        
+    Returns:
+        str: Well ID (e.g., 'A1', 'H12')
+    """
+    row_letter = chr(65 + row)
+    well_number = col + 1
     return f"{row_letter}{well_number}"
 
-# --- Stepper Motor Controller Class (Unchanged for this update) ---
+
+def position_from_well_id(well_id):
+    """
+    Convert well ID to row and column indices.
+    
+    Args:
+        well_id (str): Well ID (e.g., 'A1')
+        
+    Returns:
+        tuple: (row_index, col_index)
+    """
+    row = ord(well_id[0]) - 65
+    col = int(well_id[1:]) - 1
+    return row, col
+
+
+def get_wells_in_row(row_index, wells_to_scan):
+    """
+    Get all column indices in a row that need scanning.
+    
+    Args:
+        row_index (int): Row index (0-7)
+        wells_to_scan (set): Set of well IDs to scan
+        
+    Returns:
+        list: Sorted column indices for this row
+    """
+    cols_in_row = []
+    
+    for col_index in range(12):
+        well_id = well_id_from_position(row_index, col_index)
+        if well_id in wells_to_scan:
+            cols_in_row.append(col_index)
+    
+    return sorted(cols_in_row)
+
+
+def get_rows_with_wells(wells_to_scan):
+    """
+    Get all row indices that have wells to scan.
+    
+    This pre-calculation allows skipping empty rows entirely.
+    
+    Args:
+        wells_to_scan (set): Set of well IDs to scan
+        
+    Returns:
+        list: Sorted row indices containing wells
+    """
+    rows_with_wells_set = set()
+    
+    for well_id in wells_to_scan:
+        row, col = position_from_well_id(well_id)
+        rows_with_wells_set.add(row)
+    
+    return sorted(list(rows_with_wells_set))
+
+
+def calculate_x_steps(current_col, target_col):
+    """
+    Calculate X-axis steps needed to move between columns.
+    
+    Accounts for skipped columns in the calculation.
+    
+    Example:
+        Col 0 to Col 3: 3 * 10 = 30 steps
+        Col 0 to Col 5: 5 * 10 = 50 steps (skipped columns counted)
+    
+    Args:
+        current_col (int): Current column index
+        target_col (int): Target column index
+        
+    Returns:
+        int: Steps to move
+    """
+    col_distance = abs(target_col - current_col)
+    return col_distance * DEFAULT_X_STEP
+
+
+# ============================================================================
+# STEPPER MOTOR CONTROLLER
+# ============================================================================
 
 class StepperController:
     """
-    Manages the state and serial communication for the Stepper Motors,
-    including position tracking for homing.
+    Manages serial communication with stepper motor Arduino.
+    Tracks position and provides movement commands.
     """
+    
     def __init__(self, port=DEFAULT_SERIAL_PORT, baud=BAUD_RATE):
         self.port = port
         self.baud = baud
         self.serial_conn = None
         self.is_connected = False
-        self.current_steps = None
-
-        # Position tracking variables (steps from defined origin)
-        self.x_position_steps = 0
-        self.zy_position_steps = 0
+        
+        # Position tracking (in steps from origin)
+        self.x_position_steps = 0  
+        self.y_position_steps = 0
 
     def connect(self):
-        """Initializes the serial connection to the Arduino."""
+        """Establish serial connection to Arduino."""
         if self.is_connected and self.serial_conn:
-            logging.info(f"Already connected to {self.port}.")
+            logging.info(f"Already connected to {self.port}")
             return True
-
+        
         try:
-            logging.info(f"Attempting connection to {self.port}...")
-            self.serial_conn = serial.Serial(self.port, self.baud, timeout=SERIAL_TIMEOUT)
-            time.sleep(2)
+            logging.info(f"Connecting to {self.port}...")
+            self.serial_conn = serial.Serial(
+                self.port, 
+                self.baud, 
+                timeout=SERIAL_TIMEOUT
+            )
+            time.sleep(2) 
             self.is_connected = True
-            logging.info(f"Successfully connected to {self.port}.")
+            logging.info(f"Connected to {self.port}")
             return True
+            
         except serial.SerialException as e:
             self.is_connected = False
-            logging.error(f"Failed to connect to {self.port}: {e}")
+            logging.error(f"Connection failed: {e}")
             return False
 
     def disconnect(self):
-        """Closes the serial connection."""
+        """Close serial connection."""
         if self.serial_conn and self.is_connected:
             self.serial_conn.close()
             self.is_connected = False
-            logging.info("Serial connection closed.")
+            logging.info("Disconnected")
             return True
         return False
 
-    def send_command(self, command: str, wait_for_response=True):
-        """Sends a command to the Arduino and optionally waits for a response."""
+    def send_command(self, command, wait_for_response=True):
+        """
+        Send command to Arduino.
+        
+        Args:
+            command (str): Command to send
+            wait_for_response (bool): Wait for Arduino response
+            
+        Returns:
+            tuple: (success, response_message)
+        """
         if not self.is_connected or not self.serial_conn:
-            logging.error(f"Cannot send command '{command}'. Serial connection is not active.")
-            return False, "Connection not active."
-
+            return False, "Connection not active"
+        
         try:
             full_command = (command + '\n').encode('ascii')
             self.serial_conn.write(full_command)
+            time.sleep(0.1)
+            
             if wait_for_response:
-                response_line = self.serial_conn.readline().decode('ascii').strip()
-                if "OK" in response_line or "Ready" in response_line:
-                    return True, response_line
+                response = self.serial_conn.readline().decode('ascii').strip()
+                if response:
+                    logging.debug(f"Command '{command}' -> {response}")
+                    return True, response
                 else:
-                    return False, f"Received non-success response: {response_line}"
-
-            return True, "Command sent."
+                    logging.debug(f"Command '{command}' sent (no response)")
+                    return True, "Command sent"
+            
+            return True, "Command sent"
 
         except serial.SerialException as e:
-            logging.error(f"Serial error while sending command {command}: {e}")
-            return False, f"Serial error: {e}"
+            logging.error(f"Serial error: {e}")
+            return False, str(e)
 
-    def _set_steps(self, new_steps):
-        """Internal function to set the step size for the next move."""
-        self.current_steps = new_steps
-        command = f"S{new_steps}"
-        return self.send_command(command, wait_for_response=True)[0]
+    def _set_steps(self, num_steps):
+        """Set step size for next movement."""
+        self.current_steps = num_steps
+        return self.send_command(f"S{num_steps}", wait_for_response=True)[0]
 
-    # --- Combined Movement Functions (with tracking) ---
-
-    def move_x_steps(self, steps: int, forward: bool = True):
-        """Sets step size, moves the X motor, and updates position tracker."""
-        if steps <= 0: return True
+    def move_x(self, steps, forward=True):
+        """
+        Move X motor and update position.
+        
+        Args:
+            steps (int): Number of steps to move
+            forward (bool): Direction (True = forward, False = backward)
+            
+        Returns:
+            bool: Success status
+        """
+        if steps <= 0:
+            return True 
 
         self._set_steps(steps)
         command = 'x' if forward else 'X'
-        success, response = self.send_command(command)
-
+        success, _ = self.send_command(command)
+        
         if success:
             self.x_position_steps += steps if forward else -steps
         return success
 
-    def move_zy_steps(self, steps: int, forward: bool = True):
-        """Sets step size, moves the Z+Y motors, and updates position tracker."""
-        if steps <= 0: return True
+    def move_y(self, steps, forward=True):
+        """
+        Move Y motor and update position.
+        
+        Args:
+            steps (int): Number of steps to move
+            forward (bool): Direction (True = forward, False = backward)
+            
+        Returns:
+            bool: Success status
+        """
+        if steps <= 0:
+            return True 
 
         self._set_steps(steps)
         command = 'A' if forward else 'a'
-        success, response = self.send_command(command)
-
+        success, _ = self.send_command(command)
+        
         if success:
-            self.zy_position_steps += steps if forward else -steps
+            self.y_position_steps += steps if forward else -steps
         return success
-
-    # --- Homing Functions (Calculate steps moved and return to origin) ---
+    
     def home_x(self):
-        """
-        Calculates steps to return to the relative X origin (0) and moves in the **opposite direction**.
-        Called after a column is completed.
-        """
+        """Return X motor to origin."""
         steps_to_move = abs(self.x_position_steps)
-        # Move opposite: forward if position is negative, backward if position is positive
-        forward_direction = self.x_position_steps < 0
-
+        
         if steps_to_move == 0:
-            logging.info("X-Axis is already at origin (0 steps).")
+            logging.info("X-axis already at origin")
             return True
 
-        logging.info(f"X-Home: Returning {steps_to_move} steps to origin.")
-        success = self.move_x_steps(steps_to_move, forward=forward_direction)
+        # Move opposite direction to return to origin
+        forward_direction = self.x_position_steps < 0
+        
+        logging.info(f"X-homing: returning {steps_to_move} steps")
+        success = self.move_x(steps_to_move, forward=forward_direction)
 
         if success:
-            self.x_position_steps = 0
-            logging.info("X-Axis successfully returned to origin.")
+            self.x_position_steps = 0 
+            logging.info("X-axis homed")
         else:
-            logging.error("X-Axis homing failed.")
+            logging.error("X-homing failed")
 
         return success
 
     def home_y(self):
-        """
-        Calculates steps to return to the relative Y origin (0) and moves in the **opposite direction**.
-        Called after all wells are completed.
-        """
-        steps_to_move = abs(self.zy_position_steps)
-        # Move opposite: forward if position is negative, backward if position is positive
-        forward_direction = self.zy_position_steps < 0
-
+        """Return Y motor to origin."""
+        steps_to_move = abs(self.y_position_steps)
+        
         if steps_to_move == 0:
-            logging.info("Y-Axis is already at row starting position (0 steps).")
+            logging.info("Y-axis already at origin")
             return True
 
-        logging.info(f"Y-Home: Returning {steps_to_move} steps to row start.")
-        success = self.move_zy_steps(steps_to_move, forward=forward_direction)
+        # Move opposite direction to return to origin
+        forward_direction = self.y_position_steps < 0
+        
+        logging.info(f"Y-homing: returning {steps_to_move} steps")
+        success = self.move_y(steps_to_move, forward=forward_direction)
 
         if success:
-            self.zy_position_steps = 0
-            logging.info("Y-Axis successfully returned to row starting position.")
+            self.y_position_steps = 0 
+            logging.info("Y-axis homed")
         else:
-            logging.error("Y-Axis homing failed.")
-
+            logging.error("Y-homing failed")
+            
         return success
 
     def enable_motors(self):
-        """Enables all stepper motor drivers. C command: 'E'."""
-        return self.send_command("E")[0]
-
-    def disable_motors(self):
-        """Disables all stepper motor drivers. C command: 'D'."""
-        return self.send_command("D", wait_for_response=False)[0]
-
-
-# --- Routine Execution Logic (MODIFIED) ---
-
-def execute_96well_plate_routine(routine_name, controller, exposure_time_us=DEFAULT_EXPOSURE_TIME_US):
-    """
-    Executes the complete 96-well plate scanning routine, skipping wells/rows
-    based on a pre-fetched scan map.
-
-    Process:
-    1. For each row (A-H):
-       - Calculate total X-steps required for this row by grouping contiguous skips.
-       - Move along X axis, capturing images only for wells marked True.
-       - After completing each column, move X back to origin.
-       - Move Y down to the *next* row that requires scanning.
-    2. After all rows are complete, return Y axis to origin using home_y()
-    """
-
-    # Fetch routine parameters from database
-    routine_data = fetch_routine_data(routine_name)
-    num_wells_x = routine_data['num_wells_x']  # 12 columns
-    num_wells_y = routine_data['num_wells_y']  # 8 rows
+        """Enable stepper motor drivers."""
+        success, response = self.send_command("E", wait_for_response=True)
+        logging.info(f"Motors enabled: {response}")
+        return success
     
-    # Fetch the well scanning map
-    scan_map = fetch_well_scan_map(routine_name, num_wells_y, num_wells_x)
+    def disable_motors(self):
+        """Disable stepper motor drivers."""
+        success, _ = self.send_command("D", wait_for_response=False)
+        logging.info("Motors disabled")
+        return success
 
-    logging.info(f"Starting 96-well plate routine (Skipping enabled): {routine_name}")
-    logging.info(f"Grid dimensions: {num_wells_x} columns × {num_wells_y} rows")
 
+# ============================================================================
+# ROUTINE EXECUTION
+# ============================================================================
+
+def execute_96well_plate_routine(
+    routine_name, 
+    controller, 
+    plate_number=1, 
+    exposure_time_us=DEFAULT_EXPOSURE_TIME_US
+):
+    """
+    Execute optimized 96-well plate scanning routine.
+    
+    Only visits wells marked for scanning in the database.
+    Skips empty columns and rows to minimize movement time.
+    
+    Process:
+    1. Fetch wells to scan from database
+    2. Pre-calculate rows that have wells
+    3. For each row with wells:
+       - Move Y-axis to reach the row (skip empty rows)
+       - For each column with wells:
+         - Move X-axis to column
+         - Capture image
+       - Return X-axis to origin
+    4. Return Y-axis to origin
+    
+    Args:
+        routine_name (str): Name of routine to execute
+        controller (StepperController): Motor controller instance
+        plate_number (int): Plate number to scan
+        exposure_time_us (int): Camera exposure time
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    
+    # Fetch data
+    routine_data = fetch_routine_data(routine_name)
+    wells_to_scan = fetch_wells_to_scan(routine_name, plate_number)
+    rows_with_wells = get_rows_with_wells(wells_to_scan)
+    
+    logging.info(f"\n{'='*60}")
+    logging.info(f"Starting routine: {routine_name}")
+    logging.info(f"Plate: {plate_number}")
+    logging.info(f"Total wells: {len(wells_to_scan)}")
+    logging.info(f"Rows with wells: {[chr(65 + r) for r in rows_with_wells]}")
+    logging.info(f"{'='*60}\n")
+    
     # Enable motors
     if not controller.enable_motors():
-        logging.error("Failed to enable motors. Aborting routine.")
-        return False
-
-    wells_captured = 0
-    total_wells = num_wells_x * num_wells_y
+        logging.warning("Motor enable failed, continuing anyway...")
     
-    # Pre-calculate the next row that needs scanning for the row-skipping logic
-    rows_to_scan = [r for r, row_map in enumerate(scan_map) if any(row_map)]
-    current_row_index = 0
-
+    wells_captured = 0
+    current_row_position = 0  # Current row position (0-7)
+    
     try:
-        while current_row_index < num_wells_y:
-            row = current_row_index
-            row_letter = chr(65 + row)
-            row_map = scan_map[row]
+        # Process each row that has wells
+        for row_index in rows_with_wells:
+            row_letter = chr(65 + row_index)
+            cols_in_row = get_wells_in_row(row_index, wells_to_scan)
             
-            # 1. Row Skipping Logic (Moves Y-axis past entirely skipped rows)
-            # Find the next row that contains at least one well to scan
-            is_scan_row = any(row_map)
+            logging.info(f"\n--- Row {row_letter} ---")
+            logging.info(f"Columns to scan: {[c + 1 for c in cols_in_row]}")
             
-            if not is_scan_row:
-                logging.info(f"Skipping entire row {row_letter} (no wells to scan).")
+            # Move Y-axis to target row
+            rows_to_move = row_index - current_row_position
+            if rows_to_move > 0:
+                y_steps = rows_to_move * DEFAULT_Y_STEP
+                logging.info(f"Moving Y-axis {rows_to_move} rows ({y_steps} steps)...")
                 
-                # Check how many contiguous rows are skipped to calculate Y movement
-                skipped_rows_count = 1
-                for next_r in range(row + 1, num_wells_y):
-                    if not any(scan_map[next_r]):
-                        skipped_rows_count += 1
-                    else:
-                        break # Found the next row to scan
-                        
-                # Move Y-axis the distance of the skipped rows + the current row
-                y_steps_to_move = skipped_rows_count * DEFAULT_Y_STEP
-                
-                logging.info(f"Moving Y-axis {y_steps_to_move} steps (skipping {skipped_rows_count} rows).")
-                if not controller.move_zy_steps(y_steps_to_move, forward=True):
-                    logging.error(f"Failed to move Y-axis after row {row_letter}")
+                if not controller.move_y(y_steps, forward=True):
+                    logging.error("Y-axis movement failed")
                     raise RuntimeError("Y-axis movement failed")
-                    
-                # Update current_row_index to the row *after* the skipped block
-                current_row_index += skipped_rows_count
-                continue # Skip to the next iteration (which will use the new current_row_index)
-
-            # --- Row Scanning Logic ---
             
-            logging.info(f"Starting row {row_letter}...")
-            col = 0
-            while col < num_wells_x:
+            current_row_position = row_index
+            current_col_position = 0  # Reset X position for new row
+            
+            # Process each column in this row
+            for target_col in cols_in_row:
+                well_id = well_id_from_position(row_index, target_col)
+                wells_captured += 1
                 
-                if row_map[col]:
-                    # Current well needs scanning
-                    well_id = well_id_from_position(row, col)
-                    logging.info(f"Processing well {well_id} ({wells_captured + 1}/{total_wells})")
+                # Move X-axis to target column
+                x_steps = calculate_x_steps(current_col_position, target_col)
+                if x_steps > 0:
+                    direction = target_col > current_col_position
+                    logging.info(
+                        f"  Well {well_id} ({wells_captured}/{len(wells_to_scan)}) - "
+                        f"Moving {x_steps} steps..."
+                    )
                     
-                    # Capture image of current well
-                    if not capture_well_image(well_id, exposure_time_us):
-                        logging.warning(f"Failed to capture image for well {well_id}")
-                    
-                    wells_captured += 1
-                    
-                    # Move to the *next* well in X direction, unless it's the last column
-                    if col < num_wells_x - 1:
-                        logging.info(f"Moving X-axis {DEFAULT_X_STEP} steps to column {col + 2}")
-                        if not controller.move_x_steps(DEFAULT_X_STEP, forward=True):
-                            logging.error(f"Failed to move X to well {well_id}")
-                            raise RuntimeError("X-axis movement failed")
-                    
-                    col += 1
+                    if not controller.move_x(x_steps, forward=direction):
+                        logging.error(f"X-axis movement failed for {well_id}")
+                        raise RuntimeError("X-axis movement failed")
                 
-                else:
-                    # Current well is skipped - calculate step size to the next well to scan (or end of row)
-                    
-                    skipped_count = 0
-                    for next_col in range(col, num_wells_x):
-                        if not row_map[next_col]:
-                            skipped_count += 1
-                        else:
-                            break # Found the next well to scan
-
-                    # Steps = number of skipped wells * steps per well
-                    x_steps_to_move = skipped_count * DEFAULT_X_STEP
-                    
-                    if x_steps_to_move > 0:
-                        logging.info(f"Skipping {skipped_count} wells. Moving X-axis {x_steps_to_move} steps.")
-                        if not controller.move_x_steps(x_steps_to_move, forward=True):
-                            logging.error(f"Failed to move X past skipped wells starting at {col+1}")
-                            raise RuntimeError("X-axis movement failed (skip)")
-                    
-                    col += skipped_count # Advance column index past the skipped block
-
-            # After completing a row, return X axis to origin
-            logging.info(f"Row {row_letter} complete. Returning X-axis to origin...")
+                current_col_position = target_col
+                
+                # Capture image
+                if not capture_well_image(routine_name, well_id, exposure_time_us): 
+                    logging.warning(f"Image capture failed for {well_id}")
+            
+            # Return X-axis to origin after row
+            logging.info(f"Returning X-axis to origin...")
             if not controller.home_x():
-                logging.error("Failed to return X-axis to origin")
+                logging.error("X-axis homing failed")
                 raise RuntimeError("X-axis homing failed")
-            
-            # Move Y-axis down *one* row step, as the row-skipping logic handles larger jumps
-            if row < num_wells_y - 1:
-                logging.info(f"Moving Y-axis down one step ({DEFAULT_Y_STEP} steps)...")
-                if not controller.move_zy_steps(DEFAULT_Y_STEP, forward=True):
-                    logging.error(f"Failed to move Y-axis after row {row_letter}")
-                    raise RuntimeError("Y-axis movement failed")
-                    
-            current_row_index += 1 # Advance to the next row (will be checked by the while loop condition)
         
-        # After all wells are processed, return Y axis to origin
-        logging.info("All wells processed. Returning Y-axis to origin...")
+        # Return Y-axis to origin
+        logging.info(f"\nReturning Y-axis to origin...")
         if not controller.home_y():
-            logging.error("Failed to return Y-axis to origin")
+            logging.error("Y-axis homing failed")
             raise RuntimeError("Y-axis homing failed")
         
-        logging.info(f"Routine completed successfully! {wells_captured} wells captured.")
+        logging.info(f"\n{'='*60}")
+        logging.info(f"Routine completed! Captured {wells_captured} wells")
+        logging.info(f"{'='*60}\n")
+        
         return True
         
     except Exception as e:
-        logging.error(f"Routine execution failed: {e}")
+        logging.error(f"Routine failed: {e}")
         return False
     
     finally:
-        # Disable motors
         controller.disable_motors()
-        logging.info("Motors disabled.")
 
 
-# --- Main Entry Point (Unchanged for this update) ---
+# ============================================================================
+# MAIN
+# ============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Execute 96-well plate scanning routine")
-    parser.add_argument('--routine', type=str, default='default_96well',
-                        help='Name of the routine to execute')
-    parser.add_argument('--port', type=str, default=DEFAULT_SERIAL_PORT,
-                        help='Serial port for motor controller')
-    parser.add_argument('--exposure', type=int, default=DEFAULT_EXPOSURE_TIME_US,
-                        help='Camera exposure time in microseconds')
-
+    parser = argparse.ArgumentParser(
+        description="Execute optimized 96-well plate scanning routine"
+    )
+    parser.add_argument(
+        '--routine', 
+        type=str, 
+        default='default_96well', 
+        help='Routine name (filename)'
+    )
+    parser.add_argument(
+        '--plate', 
+        type=int, 
+        default=1,
+        help='Plate number to scan'
+    )
+    parser.add_argument(
+        '--port', 
+        type=str, 
+        default=DEFAULT_SERIAL_PORT,
+        help='Serial port for motor controller'
+    )
+    parser.add_argument(
+        '--exposure', 
+        type=int, 
+        default=DEFAULT_EXPOSURE_TIME_US,
+        help='Camera exposure time (microseconds)'
+    )
+    
     args = parser.parse_args()
-
-    # Initialize stepper motor controller
+    
+    # Initialize controller
     controller = StepperController(port=args.port)
-
-    # Connect to motor controller
+    
+    # Connect
     if not controller.connect():
-        logging.error("Failed to connect to motor controller. Exiting.")
+        logging.error("Failed to connect to motor controller")
         sys.exit(1)
-    controller.enable_motors()
-    time.sleep(0.5)
-
+    
     try:
-        # Execute the 96-well plate routine
+        # Execute routine
         success = execute_96well_plate_routine(
             routine_name=args.routine,
             controller=controller,
+            plate_number=args.plate,
             exposure_time_us=args.exposure
         )
-
+        
         sys.exit(0 if success else 1)
-
+        
     finally:
-        # Ensure connection is closed
         controller.disconnect()

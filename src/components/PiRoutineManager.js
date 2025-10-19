@@ -27,6 +27,11 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
   const [localSchedule, setLocalSchedule] = useState({});
   const [initialLocalSchedule, setInitialLocalSchedule] = useState({});
   const [scheduleError, setScheduleError] = useState(null);
+  
+  // NEW STATES FOR LOGS
+  const [schedulerLogs, setSchedulerLogs] = useState([]);
+  const [logError, setLogError] = useState(null);
+  const [isLogsLoading, setIsLogsLoading] = useState(false);
 
   // Helper function to generate time options (Kept for reference).
   const generateTimeOptions = () => {
@@ -234,6 +239,35 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
       setIsLoading(false);
     }
   };
+
+  /**
+   * NEW: Fetches the recent logs from the routine scheduler.
+   */
+  const fetchSchedulerLogs = async () => {
+    setIsLogsLoading(true);
+    setLogError(null);
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/api/logs`);
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        // Log the full response data for debugging, but show the error message in the UI
+        throw new Error(data.logs ? data.logs.join('\n') : 'Failed to fetch scheduler logs.');
+      }
+      
+      setSchedulerLogs(data.logs);
+    } catch (error) {
+      console.error('Error fetching logs:', error);
+      setLogError(error.message);
+      setSchedulerLogs([]);
+    } finally {
+      setIsLogsLoading(false);
+    }
+  };
+
+  const handleRefreshLogs = () => {
+    fetchSchedulerLogs();
+  }
 
   /**
    * Computed value to detect unsaved changes in the schedule.
@@ -470,7 +504,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     }));
   };
   
-  // --- Effect Hooks for Data Loading & UI Handlers (unchanged) ---
+  // --- Effect Hooks for Data Loading & UI Handlers ---
   useEffect(() => {
     setHasMounted(true);
   }, []);
@@ -478,6 +512,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
   useEffect(() => {
     if (hasMounted && PI_BACKEND_URL) {
       fetchAllRoutines();
+      fetchSchedulerLogs(); // NEW: Fetch logs on mount
     }
   }, [hasMounted, PI_BACKEND_URL]);
 
@@ -514,7 +549,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
 
   return (
     <div className="main-container">
-      {/* --- CSS Style Block (Modified for Global Save Button) --- */}
+      {/* --- CSS Style Block (Modified for Logs and Global Save Button) --- */}
       <style>{`
         .main-container {
             padding: 2rem;
@@ -784,6 +819,60 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
             border-radius: 0.375rem;
             border: 1px solid #f87171;
         }
+        
+        /* NEW LOG STYLES */
+        .log-container {
+            background: #f9fafb;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            margin-top: 20px; 
+        }
+        .log-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #4b5563;
+            margin-bottom: 1rem;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .refresh-logs-button {
+            padding: 0.5rem 1rem;
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background-color 0.2s;
+        }
+        .refresh-logs-button:hover:not(:disabled) {
+            background-color: #2563eb;
+        }
+        .refresh-logs-button:disabled {
+            background-color: #93c5fd;
+            cursor: not-allowed;
+        }
+        .log-display {
+            background-color: #1f2937; /* Dark background for terminal look */
+            color: #e5e7eb; /* Light text color */
+            padding: 1rem;
+            border-radius: 0.5rem;
+            min-height: 200px;
+            max-height: 400px; /* Limit height and allow scrolling */
+            overflow-y: scroll; 
+            font-family: 'Consolas', 'Monaco', monospace;
+            white-space: pre-wrap; /* Preserve formatting but wrap long lines */
+            font-size: 0.85rem;
+        }
+        .log-error {
+            color: #ef4444; /* Red color for errors */
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
       `}</style>
       {/* --- Main Content --- */}
       <div className="columns-container">
@@ -1012,6 +1101,25 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
         >
           {hasUnsavedChanges ? 'Save All Schedules' : 'No Changes to Save'}
         </button>
+      </div>
+
+      {/* NEW LOGS DISPLAY CONTAINER */}
+      <div className="log-container">
+        <div className="log-title">
+            Routine Scheduler Logs (Last 50 Lines)
+            <button onClick={handleRefreshLogs} disabled={isLogsLoading} className="refresh-logs-button">
+                {isLogsLoading ? 'Refreshing...' : 'Refresh'}
+            </button>
+        </div>
+        
+        {logError && <p className="log-error">API Error: {logError}</p>}
+        
+        <pre className="log-display">
+          {schedulerLogs.length > 0 
+            ? schedulerLogs.join('\n') 
+            : (isLogsLoading ? 'Loading logs...' : 'No logs found or failed to load.')
+          }
+        </pre>
       </div>
 
     {/* Delete Confirmation Modal */}
