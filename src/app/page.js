@@ -9,7 +9,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState('routine');
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
   // The actual backend URL for the Raspberry Pi
-  const PI_BACKEND_URL = 'http://192.168.1.7:5000';
+  const PI_BACKEND_URL = 'http://192.168.1.43:5000';
   const CONNECTION_TIMEOUT = 5000; // 5 seconds
 
   const checkConnectionAndFetchData = async () => {

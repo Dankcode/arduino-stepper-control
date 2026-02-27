@@ -104,7 +104,7 @@ def main():
         type=int,
         default=DEFAULT_EXPOSURE_TIME_US,
         help=(
-            f"Manually set the exposure time in **microseconds (µs)**.\n"
+            f"Manually set the exposure time in **microseconds**.\n"
             f"Default is {DEFAULT_EXPOSURE_TIME_US} µs ({DEFAULT_EXPOSURE_TIME_US/1000} ms)."
         )
     )
