@@ -1,13 +1,14 @@
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, Response
 from flask_cors import CORS
 import subprocess
 import os
-import sqlite3 # Import the sqlite3 library
-from datetime import datetime, timedelta 
+import sqlite3
+from datetime import datetime, timedelta
 from manual_control import StepperController, global_controller, controller_lock
 import zipfile
 from urllib.parse import unquote
 import io
+import time as time_module
 
 ROUTINES_DIR = '/home/dank/routines/'
 ACTIVE_ROUTINES_DIR = '/home/dank/active_routines/'
@@ -788,9 +789,76 @@ def get_recent_logs():
 
     except Exception as e:
         print(f"Error reading log file: {str(e)}")
-        # Return a server error response
-        return jsonify({"logs": [f"Error reading logs: {str(e)}"], "success": False}), 500      
-     
+        return jsonify({"logs": [f"Error reading logs: {str(e)}"], "success": False}), 500
+
+# ---------------------------------------------------------------------------
+# Live Camera Stream  (MJPEG via multipart/x-mixed-replace)
+# ---------------------------------------------------------------------------
+_stream_active = False  # simple flag to prevent stacking streams
+
+@app.route('/api/camera/stream')
+def camera_stream():
+    """
+    Streams live MJPEG frames from the Pi camera.
+    The browser can consume this directly as an <img src=".../stream"> tag.
+    """
+    global _stream_active
+
+    try:
+        from picamera2 import Picamera2
+        import cv2
+    except ImportError as e:
+        return jsonify({"error": f"Missing library: {e}. Install picamera2 and opencv-python-headless on the Pi."}), 500
+
+    def generate_frames():
+        global _stream_active
+        if _stream_active:
+            # Already streaming — send a single error frame and stop
+            return
+        _stream_active = True
+        picam2 = None
+        try:
+            picam2 = Picamera2()
+            # Use a lower-resolution video config for smooth streaming
+            config = picam2.create_video_configuration(
+                main={"size": (1280, 720), "format": "RGB888"}
+            )
+            picam2.configure(config)
+            picam2.start()
+            time_module.sleep(0.5)  # allow sensor to stabilise
+
+            while True:
+                frame = picam2.capture_array()          # RGB numpy array
+                ok, jpeg = cv2.imencode(
+                    '.jpg', frame,
+                    [cv2.IMWRITE_JPEG_QUALITY, 80]
+                )
+                if not ok:
+                    continue
+                yield (
+                    b'--frame\r\n'
+                    b'Content-Type: image/jpeg\r\n\r\n' +
+                    jpeg.tobytes() +
+                    b'\r\n'
+                )
+        except GeneratorExit:
+            pass  # client disconnected — clean exit
+        except Exception as e:
+            print(f"[stream] Error during streaming: {e}")
+        finally:
+            _stream_active = False
+            if picam2 is not None:
+                try:
+                    picam2.stop()
+                    picam2.close()
+                except Exception:
+                    pass
+
+    return Response(
+        generate_frames(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
 if __name__ == '__main__':
     # Initialize the database *before* running the app
     init_db()

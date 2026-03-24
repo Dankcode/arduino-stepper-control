@@ -5,13 +5,16 @@ const StepperMotorControl = () => {
   const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
-  const [manualExposure, setManualExposure] = useState(50000); 
-  // NEW STATE: Track if the light is currently on
+  const [manualExposure, setManualExposure] = useState(50000);
   const [blueLightOn, setBlueLightOn] = useState(false);
+  const [wellTestProgress, setWellTestProgress] = useState('');
 
   const API_BASE = 'http://192.168.1.43:5000/api';
 
   useEffect(() => {
+    // Load persisted step count from localStorage
+    const saved = localStorage.getItem('cnc_default_steps');
+    if (saved) setSteps(parseInt(saved, 10));
     checkStatus();
   }, []);
 
@@ -38,7 +41,7 @@ const StepperMotorControl = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ state: targetState }),
       });
-      
+
       const data = await response.json();
       if (data.success) {
         setBlueLightOn(targetState === 'on');
@@ -84,6 +87,8 @@ const StepperMotorControl = () => {
       });
       const data = await response.json();
       setMessage(data.message);
+      // Persist the step count so it survives page reloads
+      localStorage.setItem('cnc_default_steps', steps);
     } catch (error) { setMessage('Failed to update steps'); }
   };
 
@@ -98,7 +103,44 @@ const StepperMotorControl = () => {
     } catch (error) { setMessage(`Failed to send ${endpoint} command`); }
     setLoading(false);
   };
-  
+
+  // --- Well Navigation Test: A1 → A2 → B1 → Home ---
+  const handleWellTest = async () => {
+    if (!connected) { setMessage('Arduino not connected'); return; }
+    setLoading(true);
+    setWellTestProgress('Starting well test...');
+    const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    const step = async (label, endpoint) => {
+      setWellTestProgress(`Moving: ${label}`);
+      await sendMotorCommandSilent(endpoint);
+      await delay(600);
+    };
+
+    try {
+      // A1 → A2: move X forward
+      await step('A1 → A2 (X Forward)', 'x-forward');
+      // A2 → B1: move ZY forward
+      await step('A2 → B1 (ZY Forward)', 'zy-forward');
+      // B1 → A1: reverse ZY then reverse X (return home)
+      await step('B1 → A2 (ZY Backward)', 'zy-backward');
+      await step('A2 → A1 (X Backward)', 'x-backward');
+      setWellTestProgress('✅ Well test complete — returned to home (A1)');
+      setMessage('Well test sequence finished successfully.');
+    } catch (err) {
+      setWellTestProgress('❌ Well test failed.');
+      setMessage(`Well test error: ${err.message}`);
+    }
+    setLoading(false);
+  };
+
+  // Silent variant used internally by handleWellTest (no loading state toggle)
+  const sendMotorCommandSilent = async (endpoint) => {
+    const response = await fetch(`${API_BASE}/motor/${endpoint}`, { method: 'POST' });
+    const data = await response.json();
+    setMessage(data.message);
+  };
+
   const handleTakePicture = async () => {
     if (manualExposure <= 0) { setMessage('Error: Exposure time must be > 0'); return; }
     setLoading(true);
@@ -107,8 +149,8 @@ const StepperMotorControl = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            exposure_time: manualExposure, 
-            routine_name: 'ManualControl_Snapshot' 
+          exposure_time: manualExposure,
+          routine_name: 'ManualControl_Snapshot'
         }),
       });
       const data = await response.json();
@@ -123,39 +165,131 @@ const StepperMotorControl = () => {
     <div className="container">
       <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
       <style>{`
-        body { margin: 0; font-family: 'Inter', sans-serif; background: linear-gradient(to bottom right, #e0e0e0, #c0c0c0); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 1rem; box-sizing: border-box; }
-        .container { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 1rem; box-sizing: border-box; }
-        .card { background-color: #ffffff; padding: 2rem; border-radius: 1.5rem; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); width: 100%; max-width: 28rem; border: 1px solid #e2e8f0; }
-        .title { font-size: 2.25rem; font-weight: 800; text-align: center; color: #1a202c; margin-bottom: 2rem; }
-        .message-display { padding: 0.75rem; border-radius: 0.5rem; background-color: #f3f4f6; border: 1px solid #e5e7eb; margin-top: 1rem; margin-bottom: 1rem; }
-        .message-text { font-size: 0.875rem; color: #4b5563; }
-        .status-block, .input-section { margin-bottom: 1.5rem; padding: 0.75rem; border-radius: 0.5rem; background-color: #f9fafb; }
-        .status-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
-        .status-label { font-size: 0.875rem; font-weight: 500; color: #4a5568; }
-        .status-indicator { padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-weight: 500; }
-        .status-indicator.connected { background-color: #d1fae5; color: #065f46; }
-        .status-indicator.disconnected { background-color: #fee2e2; color: #b91c1c; }
+        .container { 
+          display: flex; 
+          flex-direction: column; 
+          align-items: center; 
+          padding: 2rem; 
+          box-sizing: border-box;
+          overflow-y: auto;
+          flex-grow: 1;
+        }
+        .card { 
+          background-color: #1e293b; 
+          padding: 1.5rem; 
+          border-radius: 1rem; 
+          box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); 
+          width: 100%; 
+          max-width: 32rem; 
+          border: 1px solid #334155; 
+        }
+        .title { 
+          font-size: 1.5rem; 
+          font-weight: 800; 
+          text-align: center; 
+          color: #f8fafc; 
+          margin-bottom: 1.5rem;
+          text-transform: uppercase;
+          letter-spacing: 0.1em;
+        }
+        .message-display { 
+          padding: 0.75rem; 
+          border-radius: 0.5rem; 
+          background-color: #0f172a; 
+          border: 1px solid #1e293b; 
+          margin-top: 1rem; 
+          margin-bottom: 1rem; 
+        }
+        .message-text { 
+          font-size: 0.8rem; 
+          color: #94a3b8; 
+          font-family: 'JetBrains Mono', monospace;
+          margin: 0;
+        }
+        .status-block, .input-section { 
+          margin-bottom: 1rem; 
+          padding: 1rem; 
+          border-radius: 0.5rem; 
+          background-color: #0f172a;
+          border: 1px solid #334155;
+        }
+        .status-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+        .status-label { font-size: 0.7rem; font-weight: 700; color: #64748b; text-transform: uppercase; }
+        .status-indicator { padding: 0.2rem 0.6rem; border-radius: 0.25rem; font-size: 0.65rem; font-weight: 800; text-transform: uppercase; }
+        .status-indicator.connected { background-color: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid #10b981; }
+        .status-indicator.disconnected { background-color: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid #ef4444; }
         .flex-buttons-group { display: flex; gap: 0.5rem; }
-        .btn { padding: 0.75rem 1rem; font-weight: 500; border-radius: 0.25rem; cursor: pointer; border: none; flex: 1; }
-        .btn-connect { background-color: #2563eb; color: #ffffff; }
-        .btn-disconnect { background-color: #dc2626; color: #ffffff; }
-        .input-label { display: block; font-size: 0.875rem; font-weight: 500; color: #4a5568; margin-bottom: 0.5rem; }
-        .input-field { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid #cbd5e0; border-radius: 0.25rem; font-size: 0.875rem; outline: none; }
-        .btn-update-steps { padding: 0.5rem 1rem; background-color: #16a34a; color: #ffffff; }
-        .motor-buttons-group { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.5rem; }
-        .btn-motor { width: 100%; padding: 0.75rem 1rem; font-weight: 500; border-radius: 0.25rem; color: #ffffff; cursor: pointer; border: none; }
-        .btn-motor.blue { background-color: #2563eb; }
-        .btn-motor.purple { background-color: #9333ea; }
-        .btn-motor.green { background-color: #16a34a; }
-        .btn-motor.red { background-color: #dc2626; }
-        .btn-motor.yellow { background-color: #d97706; }
-        .btn-motor.orange { background-color: #f97316; font-weight: 800; }
-        
-        /* NEW BLUE LIGHT STYLE */
-        .btn-motor.cyan { background-color: #0891b2; font-weight: 700; border: 2px solid transparent; }
-        .btn-motor.cyan.active { background-color: #22d3ee; border-color: #0e7490; color: #083344; box-shadow: 0 0 15px rgba(34, 211, 238, 0.6); }
+        .btn { 
+          padding: 0.6rem 1rem; 
+          font-weight: 700; 
+          border-radius: 0.375rem; 
+          cursor: pointer; 
+          border: none; 
+          flex: 1; 
+          font-size: 0.75rem;
+          text-transform: uppercase;
+          transition: all 0.2s;
+        }
+        .btn-connect { background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; }
+        .btn-disconnect { background: #334155; color: #94a3b8; }
+        .btn-connect:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3); }
 
-        .loading-spinner { display: inline-block; animation: spin 1s linear infinite; border: 2px solid rgba(0, 0, 0, 0.1); border-top-color: #2563eb; border-radius: 50%; height: 1.5rem; width: 1.5rem; }
+        .input-label { display: block; font-size: 0.65rem; font-weight: 700; color: #64748b; margin-bottom: 0.5rem; text-transform: uppercase; }
+        .input-field { 
+          flex: 1; 
+          padding: 0.5rem; 
+          border: 1px solid #334155; 
+          border-radius: 0.25rem; 
+          font-size: 0.85rem; 
+          outline: none; 
+          background: #1e293b; 
+          color: #0ea5e9;
+          font-family: 'JetBrains Mono', monospace;
+        }
+        .btn-update-steps { 
+          padding: 0.5rem 1rem; 
+          background-color: #0ea5e9; 
+          color: white; 
+        }
+        .motor-buttons-group { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
+        .btn-motor { 
+          width: 100%; 
+          padding: 0.75rem; 
+          font-weight: 700; 
+          border-radius: 0.375rem; 
+          color: #ffffff; 
+          cursor: pointer; 
+          border: 1px solid rgba(255,255,255,0.1); 
+          font-size: 0.75rem;
+          text-transform: uppercase;
+          transition: all 0.2s;
+        }
+        .btn-motor:hover:not(:disabled) { background-color: rgba(255,255,255,0.1); }
+        .btn-motor.blue { background-color: #1e293b; color: #3b82f6; border-color: #3b82f6; }
+        .btn-motor.purple { background-color: #1e293b; color: #a855f7; border-color: #a855f7; }
+        .btn-motor.green { background-color: #1e293b; color: #10b981; border-color: #10b981; }
+        .btn-motor.red { background-color: #1e293b; color: #ef4444; border-color: #ef4444; }
+        .btn-motor.yellow { background-color: #1e293b; color: #f59e0b; border-color: #f59e0b; }
+        .btn-motor.orange { background: linear-gradient(135deg, #f97316, #ea580c); color: white; border: none; }
+        
+        .btn-motor.cyan { background-color: #1e293b; color: #06b6d4; border-color: #06b6d4; }
+        .btn-motor.cyan.active { background-color: #06b6d4; color: #083344; box-shadow: 0 0 15px rgba(6, 182, 212, 0.4); }
+        
+        .btn-motor.teal { background: linear-gradient(135deg, #0ea5e9, #0284c7); color: white; border: none; }
+        .btn-motor.teal:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3); }
+
+        .well-test-progress { 
+          margin-top: 0.5rem; 
+          padding: 0.5rem; 
+          border-radius: 0.375rem; 
+          background-color: #0f172a; 
+          border: 1px solid #0ea5e9; 
+          font-size: 0.7rem; 
+          color: #0ea5e9; 
+          font-family: 'JetBrains Mono', monospace;
+        }
+
+        .loading-spinner { display: inline-block; animation: spin 1s linear infinite; border: 2px solid rgba(14, 165, 233, 0.1); border-top-color: #0ea5e9; border-radius: 50%; height: 1.25rem; width: 1.25rem; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
       `}</style>
 
@@ -179,7 +313,7 @@ const StepperMotorControl = () => {
         <div className="status-block">
           <label className="input-label">Manual Light Control:</label>
           <div className="flex-buttons-group">
-            <button 
+            <button
               onClick={() => handleBlueLightToggle(blueLightOn ? 'off' : 'on')}
               className={`btn-motor cyan ${blueLightOn ? 'active' : ''}`}
               disabled={loading}
@@ -216,6 +350,8 @@ const StepperMotorControl = () => {
           </div>
           <button onClick={handleTakePicture} disabled={loading || !connected} className="btn-motor orange">Take Picture 📸</button>
           <button onClick={() => sendMotorCommand('test')} disabled={loading || !connected} className="btn-motor yellow">Test Motors</button>
+          <button onClick={handleWellTest} disabled={loading || !connected} className="btn-motor teal">Well Test 🧪 (A1→A2→B1→Home)</button>
+          {wellTestProgress && <div className="well-test-progress">{wellTestProgress}</div>}
         </div>
 
         {message && <div className="message-display"><p className="message-text">{message}</p></div>}

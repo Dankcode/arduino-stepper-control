@@ -1,9 +1,10 @@
 'use client';
 import { useState, useEffect } from 'react';
-import StepperMotorControl from '../components/ManualControl'; 
-import RoutineBuilder from '../components/RoutineBuilder'; 
-import PiRoutineManager from '../components/PiRoutineManager'; 
+import StepperMotorControl from '../components/ManualControl';
+import RoutineBuilder from '../components/RoutineBuilder';
+import PiRoutineManager from '../components/PiRoutineManager';
 import PictureBrowser from '../components/PictureBrowser';
+import CameraStream from '../components/CameraStream';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('routine');
@@ -25,7 +26,7 @@ export default function Home() {
 
       // Race the fetch and the timeout promises
       const response = await Promise.race([fetchPromise, timeoutPromise]);
-      
+
       if (!response.ok) {
         throw new Error('Network response was not ok');
       }
@@ -60,159 +61,105 @@ export default function Home() {
         body {
           margin: 0;
           font-family: 'Inter', sans-serif;
-          background: linear-gradient(to bottom right, #e0e0e0, #c0c0c0);
-          min-height: 100vh;
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          padding: 1rem;
-          box-sizing: border-box;
+          background-color: #020617; /* Darkest Navy */
+          color: #f8fafc;
+          height: 100vh;
+          overflow: hidden;
         }
 
         .main-wrapper {
-          width: 100%;
-          margin-left: auto;
-          margin-right: auto;
-          padding: 2rem;
-          box-sizing: border-box;
           display: flex;
           flex-direction: column;
-          align-items: center;
-          /* FIX: To make the sticky element work within the wrapper, its width must be restricted */
-          max-width: 72rem; 
+          height: 100vh;
+          width: 100vw;
+          box-sizing: border-box;
+          position: relative;
         }
 
-        .main-title {
-          font-size: 2.25rem;
-          font-weight: 700;
-          margin-bottom: 1.5rem;
-          color: #1a202c;
-          text-align: center;
-        }
-        
         .connection-status-box {
           position: absolute;
-          top: 1rem;
+          top: 0.75rem;
           right: 1rem;
-          padding: 0.5rem 1rem;
-          background-color: #ffffff;
-          border-radius: 0.5rem;
-          box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-          border: 1px solid #e2e8f0;
+          padding: 0.4rem 0.8rem;
+          background-color: #1e293b;
+          border-radius: 0.375rem;
+          border: 1px solid #334155;
           display: flex;
           align-items: center;
           gap: 0.5rem;
-          font-size: 0.875rem;
-          font-weight: 500;
-          color: #4b5563;
-          z-index: 10;
+          font-size: 0.75rem;
+          font-weight: 600;
+          color: #94a3b8;
+          z-index: 100;
         }
         
         .status-indicator-dot {
-          height: 0.75rem;
-          width: 0.75rem;
-          border-radius: 9999px;
+          height: 0.5rem;
+          width: 0.5rem;
+          border-radius: 50%;
         }
         
-        .status-indicator-dot.connected {
-          background-color: #10b981;
-        }
-        
-        .status-indicator-dot.connecting {
-          background-color: #f59e0b;
-          animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        }
+        .status-indicator-dot.connected { background-color: #10b981; box-shadow: 0 0 8px #10b981; }
+        .status-indicator-dot.connecting { background-color: #f59e0b; animation: pulse 2s infinite; }
+        .status-indicator-dot.disconnected { background-color: #ef4444; }
 
-        .status-indicator-dot.disconnected {
-          background-color: #ef4444;
-          animation: none;
-        }
-
-        @keyframes pulse {
-          0%, 100% {
-            opacity: 1;
-          }
-          50% {
-            opacity: .5;
-          }
-        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 
         .tab-section {
-          margin-bottom: 1.5rem;
-          width: 100%;
-          /* MODIFICATION: Add styles for a sticky navbar */
-          position: sticky;
-          top: 0; /* Stick to the top of the viewport */
-          z-index: 50; /* Ensure it stays above other content */
-          background-color: #e0e0e0; /* Add background to cover content when sticky */
-          padding-top: 1rem; /* Add padding to lift it off the edge */
-          padding-bottom: 0; /* Remove bottom padding as border container adds space */
-          margin-bottom: 0; /* Remove margin to stick better */
-        }
-
-        .tab-border-container {
-          border-bottom: 1px solid #e2e8f0;
-          background-color: #ffffff; /* Add white background for the tab bar itself */
-          padding: 0 1rem; /* Add horizontal padding to look clean */
-          border-radius: 0.5rem 0.5rem 0 0;
+          background-color: #0f172a;
+          border-bottom: 1px solid #1e293b;
+          padding: 0 1rem;
+          flex-shrink: 0;
+          z-index: 50;
+          display: flex;
+          align-items: center;
         }
 
         .tab-nav {
           display: flex;
-          margin-bottom: -1px;
+          gap: 0.5rem;
         }
 
         .tab-button {
-          padding-top: 0.5rem;
-          padding-bottom: 0.5rem;
-          padding-left: 1rem;
-          padding-right: 1rem;
-          border-bottom-width: 2px;
-          font-weight: 500;
-          font-size: 0.875rem;
+          padding: 1rem 1.25rem;
+          font-weight: 700;
+          font-size: 0.75rem;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
           cursor: pointer;
           background: none;
-          border-left: none;
-          border-right: none;
-          border-top: none;
-          transition: all 0.2s ease-in-out;
+          border: none;
+          color: #64748b;
+          border-bottom: 2px solid transparent;
+          transition: all 0.2s;
         }
 
         .tab-button.active {
-          border-color: #3b82f6;
-          color: #2563eb;
+          color: #0ea5e9;
+          border-bottom-color: #0ea5e9;
+          background: linear-gradient(to top, rgba(14, 165, 233, 0.1), transparent);
         }
 
-        .tab-button.inactive {
-          border-color: transparent;
-          color: #6b7280;
-        }
-
-        .tab-button.inactive:hover {
-          color: #4b5563;
-          border-color: #d1d5db;
-        }
-
-        .tab-button + .tab-button {
-          margin-left: 2rem;
+        .tab-button:hover:not(.active) {
+          color: #94a3b8;
+          background: rgba(255, 255, 255, 0.05);
         }
         
-        .card {
-          background-color: #ffffff;
-          padding: 2rem;
-          border-radius: 1.5rem;
-          box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-          width: 100%;
-          max-width: 28rem;
-          border: 1px solid #e2e8f0;
+        /* Unified container for tab content */
+        .tab-content {
+          flex-grow: 1;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
         }
 
-        .title {
-          font-size: 2.25rem;
-          font-weight: 800;
-          text-align: center;
-          color: #1a202c;
-          margin-bottom: 2rem;
+        /* Generic Card for other tabs to maintain uniformity */
+        .uniform-panel {
+          background-color: #1e293b;
+          border: 1px solid #334155;
+          border-radius: 0.75rem;
+          padding: 1.5rem;
+          box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
         }
         
         .modal {
@@ -257,57 +204,66 @@ export default function Home() {
         }
       `}</style>
 
-<div className="connection-status-box">
-  <div className={getStatusIndicatorClass()}></div>
-  {connectionStatus}
-</div>
-
-<div className="tab-section">
-        <div className="tab-border-container">
-          <nav className="tab-nav">
-            <button
-              onClick={() => setActiveTab('routine')}
-              className={`tab-button ${activeTab === 'routine' ? 'active' : 'inactive'}`}
-            >
-              Routine Builder
-            </button>
-            <button
-              onClick={() => setActiveTab('manual')}
-              className={`tab-button ${activeTab === 'manual' ? 'active' : 'inactive'}`}
-            >
-              Manual Control
-            </button>
-            <button
-              onClick={() => setActiveTab('pi')}
-              className={`tab-button ${activeTab === 'pi' ? 'active' : 'inactive'}`}
-            >
-              Pi Routines
-            </button>
-            {/* 4. NEW TAB BUTTON */}
-            <button
-              onClick={() => setActiveTab('pictures')}
-              className={`tab-button ${activeTab === 'pictures' ? 'active' : 'inactive'}`}
-            >
-              Pictures
-            </button>
-          </nav>
-        </div>
+      <div className="connection-status-box">
+        <div className={getStatusIndicatorClass()}></div>
+        {connectionStatus}
       </div>
 
-      {activeTab === 'routine' && <RoutineBuilder PI_BACKEND_URL={PI_BACKEND_URL} />}
-      {activeTab === 'manual' && <StepperMotorControl PI_BACKEND_URL={PI_BACKEND_URL} />}
-      {activeTab === 'pi' && (
-        <PiRoutineManager 
-          connectionStatus={connectionStatus}
-          PI_BACKEND_URL={PI_BACKEND_URL}
-        />
-      )}
-      {/* 5. NEW TAB CONTENT */}
-      {activeTab === 'pictures' && (
-          <PictureBrowser
-              PI_BACKEND_URL={PI_BACKEND_URL}
+      <div className="tab-section">
+        <nav className="tab-nav">
+          <button
+            onClick={() => setActiveTab('routine')}
+            className={`tab-button ${activeTab === 'routine' ? 'active' : 'inactive'}`}
+          >
+            Routine Builder
+          </button>
+          <button
+            onClick={() => setActiveTab('manual')}
+            className={`tab-button ${activeTab === 'manual' ? 'active' : 'inactive'}`}
+          >
+            Manual Control
+          </button>
+          <button
+            onClick={() => setActiveTab('pi')}
+            className={`tab-button ${activeTab === 'pi' ? 'active' : 'inactive'}`}
+          >
+            Pi Routines
+          </button>
+          <button
+            onClick={() => setActiveTab('pictures')}
+            className={`tab-button ${activeTab === 'pictures' ? 'active' : 'inactive'}`}
+          >
+            Pictures
+          </button>
+          <button
+            onClick={() => setActiveTab('camera')}
+            className={`tab-button ${activeTab === 'camera' ? 'active' : 'inactive'}`}
+          >
+            Camera
+          </button>
+        </nav>
+      </div>
+
+      <div className="tab-content">
+        {activeTab === 'routine' && <RoutineBuilder PI_BACKEND_URL={PI_BACKEND_URL} />}
+        {activeTab === 'manual' && <StepperMotorControl PI_BACKEND_URL={PI_BACKEND_URL} />}
+        {activeTab === 'pi' && (
+          <PiRoutineManager
+            connectionStatus={connectionStatus}
+            PI_BACKEND_URL={PI_BACKEND_URL}
           />
-      )}
+        )}
+        {activeTab === 'pictures' && (
+          <PictureBrowser
+            PI_BACKEND_URL={PI_BACKEND_URL}
+          />
+        )}
+        {activeTab === 'camera' && (
+          <CameraStream
+            PI_BACKEND_URL={PI_BACKEND_URL}
+          />
+        )}
+      </div>
     </div>
   );
 }
