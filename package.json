@@ -11,6 +11,8 @@
   "dependencies": {
     "@heroui/card": "^2.2.10",
     "axios": "^1.7.9",
+    "better-sqlite3": "^12.8.0",
+    "drizzle-orm": "^0.45.1",
     "lucide-react": "^0.474.0",
     "next": "14.2.3",
     "react": "^18",
@@ -19,6 +21,7 @@
   },
   "devDependencies": {
     "autoprefixer": "^10.4.21",
+    "drizzle-kit": "^0.31.10",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17"
   }
