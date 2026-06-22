@@ -1,36 +1,65 @@
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# Microscope Stepper Control
 
-## Getting Started
+Local LAN control system for a microscope stepper stage, Raspberry Pi Zero backend, Arduino-compatible stepper firmware, Pi camera, and GPIO blue light.
 
-First, run the development server:
+## Layout
+
+- `src/app` and `src/components`: Next.js dashboard.
+- `src/app/RaspiBackend`: Raspberry Pi Flask agent, scheduler, camera, blue-light, and routine runner.
+- `firmware/stepper_controller`: Arduino upload target.
+- `pi_agent`: Pi requirements and systemd service templates.
+- `scripts/deploy_pi.sh`: LAN deployment helper for copying the Pi backend.
+- `context.md` and `rules.md`: project operating context and maintenance rules.
+
+## Web Dashboard
+
+Create `.env.local` from `.env.example` and set the Pi URL:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+NEXT_PUBLIC_PI_BACKEND_URL=http://raspberrypi.local:5000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Run locally:
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
+Build:
 
-## Learn More
+```bash
+npm run build
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Raspberry Pi Agent
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Install dependencies on the Pi:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
+```bash
+python3 -m venv ~/stepper-agent-venv
+~/stepper-agent-venv/bin/pip install -r pi_agent/requirements.txt
+```
 
-## Deploy on Vercel
+Deploy over LAN:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+PI_HOST=raspberrypi.local PI_USER=dank scripts/deploy_pi.sh
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+Run manually on the Pi:
+
+```bash
+cd /home/dank/backend
+python3 backend
+```
+
+## Firmware
+
+Open `firmware/stepper_controller/stepper_controller.ino` in the Arduino IDE or CLI and upload it to the controller board.
+
+The serial protocol is documented in `firmware/README.md`.
+
+## Repository Split
+
+The current structure is split-ready while preserving the existing working tree. See `docs/repository-split.md` for suggested separate GitHub repositories and push commands.

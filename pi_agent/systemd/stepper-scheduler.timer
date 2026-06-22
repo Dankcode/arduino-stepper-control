@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Microscope Stepper Scheduler Every Minute
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+Unit=stepper-scheduler.service
+
+[Install]
+WantedBy=timers.target

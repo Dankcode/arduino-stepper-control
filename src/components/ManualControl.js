@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
-const StepperMotorControl = () => {
+const StepperMotorControl = ({ PI_BACKEND_URL }) => {
   const [steps, setSteps] = useState(400);
   const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState('');
@@ -9,28 +9,30 @@ const StepperMotorControl = () => {
   const [blueLightOn, setBlueLightOn] = useState(false);
   const [wellTestProgress, setWellTestProgress] = useState('');
 
-  const API_BASE = 'http://192.168.1.43:5000/api';
+  const API_BASE = useMemo(() => `${PI_BACKEND_URL.replace(/\/$/, '')}/api`, [PI_BACKEND_URL]);
 
-  useEffect(() => {
-    // Load persisted step count from localStorage
-    const saved = localStorage.getItem('cnc_default_steps');
-    if (saved) setSteps(parseInt(saved, 10));
-    checkStatus();
-  }, []);
-
-  const checkStatus = async () => {
+  const checkStatus = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/status`);
+      if (!response.ok) throw new Error('Status request failed');
       const data = await response.json();
       setConnected(data.connected);
-      setSteps(data.current_steps);
+      if (Number.isFinite(data.current_steps)) setSteps(data.current_steps);
       if (data.connected) {
         setMessage(`Connected to Arduino via port: ${data.port || 'Unknown'}`);
       }
     } catch (error) {
       setMessage('Failed to connect to backend');
     }
-  };
+  }, [API_BASE]);
+
+  useEffect(() => {
+    // Load persisted step count from localStorage
+    const saved = localStorage.getItem('cnc_default_steps');
+    const savedSteps = Number.parseInt(saved, 10);
+    if (Number.isFinite(savedSteps) && savedSteps > 0) setSteps(savedSteps);
+    checkStatus();
+  }, [checkStatus]);
 
   // --- NEW FUNCTION: Manual Blue Light Control ---
   const handleBlueLightToggle = async (targetState) => {
@@ -51,8 +53,9 @@ const StepperMotorControl = () => {
       }
     } catch (error) {
       setMessage('Failed to reach blue light API');
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   // --- API Functions (Existing) ---
@@ -63,8 +66,11 @@ const StepperMotorControl = () => {
       const data = await response.json();
       setMessage(data.message);
       if (data.success) setConnected(true);
-    } catch (error) { setMessage('Failed to connect to Arduino'); }
-    setLoading(false);
+    } catch (error) {
+      setMessage('Failed to connect to Arduino');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleDisconnect = async () => {
@@ -74,22 +80,36 @@ const StepperMotorControl = () => {
       const data = await response.json();
       setMessage(data.message);
       if (data.success) setConnected(false);
-    } catch (error) { setMessage('Failed to disconnect'); }
-    setLoading(false);
+    } catch (error) {
+      setMessage('Failed to disconnect');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const updateSteps = async () => {
+    const parsedSteps = Number.parseInt(steps, 10);
+    if (!Number.isFinite(parsedSteps) || parsedSteps <= 0) {
+      setMessage('Step amount must be a positive integer');
+      return;
+    }
+
     try {
       const response = await fetch(`${API_BASE}/steps`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ steps: parseInt(steps) }),
+        body: JSON.stringify({ steps: parsedSteps }),
       });
       const data = await response.json();
       setMessage(data.message);
       // Persist the step count so it survives page reloads
-      localStorage.setItem('cnc_default_steps', steps);
-    } catch (error) { setMessage('Failed to update steps'); }
+      if (response.ok) {
+        setSteps(parsedSteps);
+        localStorage.setItem('cnc_default_steps', String(parsedSteps));
+      }
+    } catch (error) {
+      setMessage('Failed to update steps');
+    }
   };
 
   const sendMotorCommand = async (endpoint) => {
@@ -100,11 +120,14 @@ const StepperMotorControl = () => {
       const data = await response.json();
       setMessage(data.message);
       await new Promise(resolve => setTimeout(resolve, 500));
-    } catch (error) { setMessage(`Failed to send ${endpoint} command`); }
-    setLoading(false);
+    } catch (error) {
+      setMessage(`Failed to send ${endpoint} command`);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  // --- Well Navigation Test: A1 → A2 → B1 → Home ---
+  // --- Well Navigation Test: A1 to A2 to B1 to Home ---
   const handleWellTest = async () => {
     if (!connected) { setMessage('Arduino not connected'); return; }
     setLoading(true);
@@ -118,26 +141,28 @@ const StepperMotorControl = () => {
     };
 
     try {
-      // A1 → A2: move X forward
-      await step('A1 → A2 (X Forward)', 'x-forward');
-      // A2 → B1: move ZY forward
-      await step('A2 → B1 (ZY Forward)', 'zy-forward');
-      // B1 → A1: reverse ZY then reverse X (return home)
-      await step('B1 → A2 (ZY Backward)', 'zy-backward');
-      await step('A2 → A1 (X Backward)', 'x-backward');
-      setWellTestProgress('✅ Well test complete — returned to home (A1)');
+      // A1 to A2: move X forward
+      await step('A1 to A2 (X Forward)', 'x-forward');
+      // A2 to B1: move ZY forward
+      await step('A2 to B1 (ZY Forward)', 'zy-forward');
+      // B1 to A1: reverse ZY then reverse X (return home)
+      await step('B1 to A2 (ZY Backward)', 'zy-backward');
+      await step('A2 to A1 (X Backward)', 'x-backward');
+      setWellTestProgress('Well test complete - returned to home (A1)');
       setMessage('Well test sequence finished successfully.');
     } catch (err) {
-      setWellTestProgress('❌ Well test failed.');
+      setWellTestProgress('Well test failed.');
       setMessage(`Well test error: ${err.message}`);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   // Silent variant used internally by handleWellTest (no loading state toggle)
   const sendMotorCommandSilent = async (endpoint) => {
     const response = await fetch(`${API_BASE}/motor/${endpoint}`, { method: 'POST' });
     const data = await response.json();
+    if (!response.ok) throw new Error(data.message || `Failed to send ${endpoint}`);
     setMessage(data.message);
   };
 
@@ -157,13 +182,15 @@ const StepperMotorControl = () => {
       if (!response.ok) throw new Error(data.message || 'Picture command failed');
       setMessage(data.message);
       await new Promise(resolve => setTimeout(resolve, 3000));
-    } catch (error) { setMessage(`Error: ${error.message}`); }
-    setLoading(false);
+    } catch (error) {
+      setMessage(`Error: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <div className="container">
-      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
       <style>{`
         .container { 
           display: flex; 
@@ -318,16 +345,16 @@ const StepperMotorControl = () => {
               className={`btn-motor cyan ${blueLightOn ? 'active' : ''}`}
               disabled={loading}
             >
-              {blueLightOn ? '🔵 BLUE LIGHT: ON' : '⚪ BLUE LIGHT: OFF'}
+              {blueLightOn ? 'BLUE LIGHT: ON' : 'BLUE LIGHT: OFF'}
             </button>
           </div>
         </div>
 
         <div className="input-section">
-          <label className="input-label">Camera Exposure Time (µs):</label>
+          <label className="input-label">Camera Exposure Time (us):</label>
           <div className="flex-buttons-group">
             <input type="number" value={manualExposure} onChange={(e) => setManualExposure(parseInt(e.target.value) || 0)} className="input-field" min="1000" />
-            <button onClick={() => setMessage(`Exposure set to ${manualExposure} µs`)} className="btn btn-update-steps">Set</button>
+            <button onClick={() => setMessage(`Exposure set to ${manualExposure} us`)} className="btn btn-update-steps">Set</button>
           </div>
         </div>
 
@@ -348,9 +375,9 @@ const StepperMotorControl = () => {
             <button onClick={() => sendMotorCommand('enable')} disabled={loading || !connected} className="btn-motor green">Enable</button>
             <button onClick={() => sendMotorCommand('disable')} disabled={loading || !connected} className="btn-motor red">Disable</button>
           </div>
-          <button onClick={handleTakePicture} disabled={loading || !connected} className="btn-motor orange">Take Picture 📸</button>
+          <button onClick={handleTakePicture} disabled={loading || !connected} className="btn-motor orange">Take Picture</button>
           <button onClick={() => sendMotorCommand('test')} disabled={loading || !connected} className="btn-motor yellow">Test Motors</button>
-          <button onClick={handleWellTest} disabled={loading || !connected} className="btn-motor teal">Well Test 🧪 (A1→A2→B1→Home)</button>
+          <button onClick={handleWellTest} disabled={loading || !connected} className="btn-motor teal">Well Test (A1 to A2 to B1 to Home)</button>
           {wellTestProgress && <div className="well-test-progress">{wellTestProgress}</div>}
         </div>
 

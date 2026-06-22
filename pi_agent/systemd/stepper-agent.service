@@ -1,0 +1,16 @@
+[Unit]
+Description=Microscope Stepper Pi Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dank
+WorkingDirectory=/home/dank/backend
+EnvironmentFile=-/home/dank/stepper-agent.env
+ExecStart=/home/dank/stepper-agent-venv/bin/python /home/dank/backend/backend
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

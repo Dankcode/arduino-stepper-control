@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import os
 import serial
 import time
 import threading
@@ -12,12 +13,13 @@ CORS(app)  # Enable CORS for Next.js frontend
 arduino = None
 current_steps = 400  # Default step amount
 serial_lock = threading.Lock()
+SERIAL_PORT = os.getenv("STEPPER_SERIAL_PORT", os.getenv("ARDUINO_SERIAL_PORT", "/dev/ttyUSB0"))
 
 def initialize_arduino():
     """Initialize the Arduino serial connection"""
     global arduino
     try:
-        arduino = serial.Serial('COM4', 9600, timeout=1)
+        arduino = serial.Serial(SERIAL_PORT, 9600, timeout=1)
         time.sleep(2)  # Wait for the connection to establish
         print("Arduino connected successfully")
         return True
@@ -35,9 +37,9 @@ def send_command(command, steps=None):
         with serial_lock:
             if steps is not None:
                 # Send steps as a string (e.g., "S500" for 500 steps)
-                arduino.write(f"S{steps}".encode())
+                arduino.write(f"S{steps}\n".encode())
                 time.sleep(0.1)  # Small delay between commands
-            arduino.write(command.encode())
+            arduino.write(f"{command}\n".encode())
             return True, "Command sent successfully"
     except Exception as e:
         return False, f"Error sending command: {e}"

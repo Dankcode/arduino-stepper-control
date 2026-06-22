@@ -3,11 +3,10 @@ import subprocess
 from datetime import datetime
 import os
 import sys
+from config import DATABASE_FILE, ROUTINE_SCRIPT_PATH
 
 # --- Configuration ---
-DATABASE_FILE = '/home/dank/routine_data.db' 
-# Ensure this path points to the new, separated routine.py file
-ROUTINE_SCRIPT_PATH = '/home/dank/backend/routine.py' 
+# Configure paths through STEPPER_DATABASE_FILE and STEPPER_ROUTINE_SCRIPT.
 
 def get_db_connection():
     """Establishes a connection to the SQLite database."""
@@ -26,7 +25,7 @@ def execute_routine_script(routine_filename_base: str):
     # Command: python3 routine.py --routine <base_filename>
     command = [
         sys.executable, 
-        ROUTINE_SCRIPT_PATH,
+        str(ROUTINE_SCRIPT_PATH),
         '--routine', routine_filename_base
     ]
     

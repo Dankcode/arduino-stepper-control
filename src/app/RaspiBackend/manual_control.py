@@ -2,16 +2,15 @@ import serial
 import threading
 import time
 import logging # Import logging module for better error tracing
+from config import BAUD_RATE, SERIAL_PORT, SERIAL_TIMEOUT
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Configuration ---
-# IMPORTANT: Update this to your Arduino's serial port!
+# IMPORTANT: Configure the Arduino serial port with STEPPER_SERIAL_PORT.
 # Common ports: '/dev/ttyACM0' (Linux/Pi), 'COM3' (Windows), '/dev/tty.usbmodemXXXX' (Mac)
-DEFAULT_SERIAL_PORT = '/dev/ttyUSB0'
-BAUD_RATE = 9600
-SERIAL_TIMEOUT = 1.5  # Timeout for serial read/write operations
+DEFAULT_SERIAL_PORT = SERIAL_PORT
 
 class StepperController:
     """
@@ -138,6 +137,10 @@ class StepperController:
         Sets the step size for the next manual move. 
         C command: 'S' followed by the integer value (e.g., 'S400').
         """
+        if new_steps <= 0:
+            logging.warning(f"Rejected invalid step size: {new_steps}")
+            return False
+
         self.current_steps = new_steps
         command = f"S{new_steps}"
         logging.info(f"Step size set internally and sent to Arduino: {new_steps}")

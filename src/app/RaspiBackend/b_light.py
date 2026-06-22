@@ -1,10 +1,11 @@
 import RPi.GPIO as GPIO
 import time
 import sys
+from config import BLUE_LIGHT_PIN
 
 # --- Hardware Configuration ---
 # GPIO 21 (Physical Pin 40 on Pi Zero)
-LIGHT_PIN = 21 
+LIGHT_PIN = BLUE_LIGHT_PIN
 
 def setup_gpio():
     """Initializes the GPIO settings."""

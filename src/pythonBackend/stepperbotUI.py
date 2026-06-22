@@ -1,18 +1,20 @@
 import tkinter as tk
 from tkinter import messagebox
+import os
 import serial
 import time
 
 # Initialize serial connection (adjust the port as necessary)
-arduino = serial.Serial('COM4', 9600, timeout=1)
+SERIAL_PORT = os.getenv("STEPPER_SERIAL_PORT", os.getenv("ARDUINO_SERIAL_PORT", "/dev/ttyUSB0"))
+arduino = serial.Serial(SERIAL_PORT, 9600, timeout=1)
 time.sleep(2)  # Wait for the connection to establish
 
 # Function to send commands to the Arduino
 def send_command(command, steps=None):
     if steps is not None:
         # Send steps as a string (e.g., "S500" for 500 steps)
-        arduino.write(f"S{steps}".encode())
-    arduino.write(command.encode())
+        arduino.write(f"S{steps}\n".encode())
+    arduino.write(f"{command}\n".encode())
 
 # Function to handle step amount changes
 def update_steps():

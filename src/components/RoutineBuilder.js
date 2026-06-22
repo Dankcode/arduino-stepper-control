@@ -2,9 +2,6 @@ import React, { useState, useCallback, useMemo } from 'react';
 import MergedPlateTable from './MergedPlateTable';
 import { wellSchema } from './plateSchema';
 
-// The base URL for the Raspberry Pi backend.
-const PI_BACKEND_URL = 'http://192.168.1.7:5000';
-
 // Helper function to get row and column counts for a given layout.
 const getLayoutDimensions = (layout) => {
   if (layout === '96-well') {
@@ -38,7 +35,7 @@ const createDefaultFilename = () => {
   return `${date}-${time}`;
 };
 
-const RoutineBuilder = () => {
+const RoutineBuilder = ({ PI_BACKEND_URL }) => {
   // State to manage the layout for each quadrant, defaulting to one active plate
   const [quadrantLayouts, setQuadrantLayouts] = useState({
     topLeft: '96-well',

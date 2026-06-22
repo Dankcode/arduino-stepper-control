@@ -3,6 +3,7 @@ import argparse
 import time
 from datetime import datetime
 from pathlib import Path
+from config import DEFAULT_EXPOSURE_TIME_US, PICTURES_DIR
 
 # --- Third-party library import ---
 try:
@@ -22,8 +23,7 @@ except ImportError:
         def started(self): return True
 
 # --- Configuration ---
-DEFAULT_EXPOSURE_TIME_US = 50000 
-BASE_SAVE_DIR = Path("/home/dank/saved_pictures")
+BASE_SAVE_DIR = PICTURES_DIR
 
 def configure_camera(picam2: Picamera2, exposure_time: int):
     """Initializes and configures the camera with manual exposure."""
@@ -55,10 +55,10 @@ def capture_single_image(exposure_time: int, output_path: Path):
         # 3. Capture and save
         print(f"  -> Saving image to: {output_path}")
         picam2.capture_file(str(output_path))
-        print(f"✅ Capture complete.")
+        print("Capture complete.")
 
     except Exception as e:
-        print(f"\n❌ An error occurred during camera operation: {e}")
+        print(f"\nAn error occurred during camera operation: {e}")
     finally:
         # 4. Stop camera safely
         if picam2 and getattr(picam2, 'started', False):
@@ -105,7 +105,7 @@ def main():
         default=DEFAULT_EXPOSURE_TIME_US,
         help=(
             f"Manually set the exposure time in **microseconds**.\n"
-            f"Default is {DEFAULT_EXPOSURE_TIME_US} µs ({DEFAULT_EXPOSURE_TIME_US/1000} ms)."
+            f"Default is {DEFAULT_EXPOSURE_TIME_US} us ({DEFAULT_EXPOSURE_TIME_US/1000} ms)."
         )
     )
 

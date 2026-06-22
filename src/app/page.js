@@ -1,47 +1,50 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import StepperMotorControl from '../components/ManualControl';
 import RoutineBuilder from '../components/RoutineBuilder';
 import PiRoutineManager from '../components/PiRoutineManager';
 import PictureBrowser from '../components/PictureBrowser';
 import CameraStream from '../components/CameraStream';
 
+const CONNECTION_TIMEOUT = 5000; // 5 seconds
+const DEFAULT_PI_BACKEND_URL = process.env.NEXT_PUBLIC_PI_BACKEND_URL || 'http://localhost:5000';
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState('routine');
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
-  // The actual backend URL for the Raspberry Pi
-  const PI_BACKEND_URL = 'http://192.168.1.43:5000';
-  const CONNECTION_TIMEOUT = 5000; // 5 seconds
+  const [lastCheckedAt, setLastCheckedAt] = useState(null);
+  // The backend URL for the Raspberry Pi. Set NEXT_PUBLIC_PI_BACKEND_URL for LAN deployments.
+  const PI_BACKEND_URL = useMemo(() => DEFAULT_PI_BACKEND_URL.replace(/\/$/, ''), []);
 
-  const checkConnectionAndFetchData = async () => {
+  const checkConnectionAndFetchData = useCallback(async () => {
     setConnectionStatus('Connecting...');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONNECTION_TIMEOUT);
+
     try {
-      // Create a timeout promise that rejects after the specified time
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Connection timed out')), CONNECTION_TIMEOUT)
-      );
-
-      // Create a promise for the fetch request
-      const fetchPromise = fetch(`${PI_BACKEND_URL}`);
-
-      // Race the fetch and the timeout promises
-      const response = await Promise.race([fetchPromise, timeoutPromise]);
+      const response = await fetch(`${PI_BACKEND_URL}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
 
       if (!response.ok) {
         throw new Error('Network response was not ok');
       }
-      const data = await response.json();
-      console.log(data);
       setConnectionStatus('Connected');
     } catch (error) {
       console.error('Failed to connect to Raspberry Pi:', error);
       setConnectionStatus('Disconnected');
+    } finally {
+      clearTimeout(timeoutId);
+      setLastCheckedAt(new Date());
     }
-  };
+  }, [PI_BACKEND_URL]);
 
   useEffect(() => {
     checkConnectionAndFetchData();
-  }, [activeTab]);
+    const intervalId = setInterval(checkConnectionAndFetchData, 30000);
+    return () => clearInterval(intervalId);
+  }, [checkConnectionAndFetchData]);
 
   const getStatusIndicatorClass = () => {
     if (connectionStatus === 'Connected') {
@@ -54,13 +57,10 @@ export default function Home() {
 
   return (
     <div className="main-wrapper">
-      {/* Google Fonts - Inter */}
-      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
-
       <style jsx global>{`
         body {
           margin: 0;
-          font-family: 'Inter', sans-serif;
+          font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           background-color: #020617; /* Darkest Navy */
           color: #f8fafc;
           height: 100vh;
@@ -91,6 +91,12 @@ export default function Home() {
           font-weight: 600;
           color: #94a3b8;
           z-index: 100;
+        }
+
+        .backend-url {
+          color: #64748b;
+          font-family: var(--font-mono);
+          font-size: 0.68rem;
         }
         
         .status-indicator-dot {
@@ -207,6 +213,10 @@ export default function Home() {
       <div className="connection-status-box">
         <div className={getStatusIndicatorClass()}></div>
         {connectionStatus}
+        <span className="backend-url">{PI_BACKEND_URL}</span>
+        {lastCheckedAt && (
+          <span className="backend-url">Checked {lastCheckedAt.toLocaleTimeString()}</span>
+        )}
       </div>
 
       <div className="tab-section">

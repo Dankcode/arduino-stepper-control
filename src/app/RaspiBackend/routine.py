@@ -8,6 +8,16 @@ from pathlib import Path
 import serial
 import logging
 import sys 
+from config import (
+    BAUD_RATE,
+    CAMERA_SCRIPT_PATH,
+    DATABASE_FILE,
+    DEFAULT_EXPOSURE_TIME_US,
+    LIGHT_SCRIPT_PATH,
+    PICTURES_DIR,
+    SERIAL_PORT,
+    SERIAL_TIMEOUT,
+)
 
 # ============================================================================
 # CONFIGURATION
@@ -18,20 +28,11 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-DEFAULT_SERIAL_PORT = '/dev/ttyUSB0'
-BAUD_RATE = 9600
-SERIAL_TIMEOUT = 1.5 
-
-DATABASE_FILE = '/home/dank/routine_data.db'
-SAVED_PICTURES_DIR = Path('/home/dank/saved_pictures') 
-# b_light.py is in the same folder as camera.py
-CAMERA_SCRIPT_PATH = '/home/dank/backend/camera.py' 
-LIGHT_SCRIPT_PATH = '/home/dank/backend/b_light.py' 
+DEFAULT_SERIAL_PORT = SERIAL_PORT
+SAVED_PICTURES_DIR = PICTURES_DIR
 
 DEFAULT_X_STEP = 20
 DEFAULT_Y_STEP = 20
-DEFAULT_EXPOSURE_TIME_US = 50000
-
 # ============================================================================
 # DATABASE FUNCTIONS
 # ============================================================================
@@ -89,7 +90,7 @@ def trigger_blue_light(duration_sec):
         logging.info(f"Triggering blue light for {duration_sec}s...")
         # Direct pass-through of seconds
         result = subprocess.run(
-            ['python3', LIGHT_SCRIPT_PATH, 'automate', str(duration_sec)],
+            [sys.executable, str(LIGHT_SCRIPT_PATH), 'automate', str(duration_sec)],
             capture_output=True,
             text=True,
             timeout=float(duration_sec) + 5
@@ -109,7 +110,7 @@ def capture_well_image(routine_name, well_id, exposure_time_us=DEFAULT_EXPOSURE_
         well_save_dir.mkdir(parents=True, exist_ok=True)
         
         command = [
-            'python3', CAMERA_SCRIPT_PATH, # Changed to python3 for consistency
+            sys.executable, str(CAMERA_SCRIPT_PATH),
             '--mode', 'routine',
             '--exposure', str(exposure_time_us),
             '--output-path', str(image_path)
@@ -179,7 +180,7 @@ class StepperController:
     def move_x(self, steps, forward=True):
         if steps <= 0: return True 
         self.send_command(f"S{steps}")
-        success, _ = self.send_command('x' if forward else 'X')
+        success, _ = self.send_command('X' if forward else 'x')
         if success: self.x_position_steps += steps if forward else -steps
         return success
 
@@ -217,6 +218,7 @@ def execute_96well_plate_routine(routine_name, controller, plate_number=1, expos
     
     controller.enable_motors()
     current_row = 0
+    current_col = 0
     wells_captured = 0
 
     try:
@@ -227,17 +229,20 @@ def execute_96well_plate_routine(routine_name, controller, plate_number=1, expos
                 controller.move_y(y_move * DEFAULT_Y_STEP, forward=True)
             current_row = row_idx
 
-            # Find columns in this row that need scanning
+            # Find columns in this row that need scanning. Move in the nearest
+            # direction from the current column to avoid homing after each row.
             cols_in_row = sorted([position_from_well_id(w)[1] for w in wells_to_scan if position_from_well_id(w)[0] == row_idx])
+            if cols_in_row and abs(cols_in_row[-1] - current_col) < abs(cols_in_row[0] - current_col):
+                cols_in_row.reverse()
             
-            current_col = 0
             for col_idx in cols_in_row:
                 well_id = well_id_from_position(row_idx, col_idx)
                 
                 # Move X to column
-                x_move = calculate_x_steps(current_col, col_idx)
+                x_delta = col_idx - current_col
+                x_move = abs(x_delta) * DEFAULT_X_STEP
                 if x_move > 0:
-                    controller.move_x(x_move, forward=True)
+                    controller.move_x(x_move, forward=x_delta > 0)
                 current_col = col_idx
 
                 # --- STEP: Blue Light Pulse ---
@@ -249,10 +254,8 @@ def execute_96well_plate_routine(routine_name, controller, plate_number=1, expos
                 # --- STEP: Image Capture ---
                 capture_well_image(routine_name, well_id, exposure_time_us)
                 wells_captured += 1
-
-            controller.home_x()
-
         controller.home_y()
+        controller.home_x()
         return True
 
     except Exception as e:

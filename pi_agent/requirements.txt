@@ -1,0 +1,8 @@
+flask
+flask-cors
+pyserial
+
+# Raspberry Pi hardware packages. Install through apt where possible:
+# python3-picamera2
+# python3-rpi.gpio
+# python3-opencv

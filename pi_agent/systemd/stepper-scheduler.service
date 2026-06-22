@@ -1,0 +1,9 @@
+[Unit]
+Description=Microscope Stepper Routine Scheduler Check
+
+[Service]
+Type=oneshot
+User=dank
+WorkingDirectory=/home/dank/backend
+EnvironmentFile=-/home/dank/stepper-agent.env
+ExecStart=/home/dank/stepper-agent-venv/bin/python /home/dank/backend/cronjob.py

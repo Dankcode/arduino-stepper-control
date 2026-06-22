@@ -20,13 +20,12 @@ const CameraStream = ({ PI_BACKEND_URL }) => {
   };
 
   const handleImgError = () => {
-    setError('Stream unavailable — check that the Pi backend is running and the camera is connected.');
+    setError('Stream unavailable - check that the Pi backend is running and the camera is connected.');
     setStreaming(false);
   };
 
   return (
     <div className="cs-container">
-      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
       <style>{`
         .cs-container {
           display: flex;
