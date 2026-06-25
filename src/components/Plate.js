@@ -22,7 +22,7 @@ const Plate = ({
       className={`plate-wrapper ${isSelected ? 'selected' : ''}`}
       onClick={() => onSelect(plate.id)}
     >
-      <style>{`
+      <style jsx global>{`
         .plate-wrapper {
           background-color: white;
           padding: 1rem;

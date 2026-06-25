@@ -1,9 +1,14 @@
 [Unit]
 Description=Microscope Stepper Routine Scheduler Check
+After=network-online.target stepper-agent.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot
 User=dank
 WorkingDirectory=/home/dank/backend
 EnvironmentFile=-/home/dank/stepper-agent.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/dank/stepper-agent-venv/bin/python /home/dank/backend/cronjob.py
+StandardOutput=append:/home/dank/routine_scheduler.log
+StandardError=append:/home/dank/routine_scheduler.log

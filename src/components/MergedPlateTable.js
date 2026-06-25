@@ -426,7 +426,7 @@ const MergedPlateTable = ({
 
   return (
     <div className="merged-plate-table-container">
-      <style>{`
+      <style jsx global>{`
         .merged-plate-table-container {
           flex: 1;
           display: flex;

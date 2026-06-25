@@ -16,7 +16,7 @@ Local LAN control system for a microscope stepper stage, Raspberry Pi Zero backe
 Create `.env.local` from `.env.example` and set the Pi URL:
 
 ```bash
-NEXT_PUBLIC_PI_BACKEND_URL=http://raspberrypi.local:5000
+NEXT_PUBLIC_PI_BACKEND_URL=http://192.168.1.43:5000
 ```
 
 Run locally:
@@ -44,7 +44,7 @@ python3 -m venv ~/stepper-agent-venv
 Deploy over LAN:
 
 ```bash
-PI_HOST=raspberrypi.local PI_USER=dank scripts/deploy_pi.sh
+PI_HOST=192.168.1.43 PI_USER=dank scripts/deploy_pi.sh
 ```
 
 Run manually on the Pi:

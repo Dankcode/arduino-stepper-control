@@ -33,7 +33,7 @@ Use `.env.local` for the web app and shell environment variables for the Pi serv
 
 The most important values are:
 
-- `NEXT_PUBLIC_PI_BACKEND_URL`: browser-visible Pi API URL, such as `http://raspberrypi.local:5000`.
+- `NEXT_PUBLIC_PI_BACKEND_URL`: browser-visible Pi API URL, currently `http://192.168.1.43:5000`.
 - `STEPPER_SERIAL_PORT`: Arduino serial device on the Pi, usually `/dev/ttyUSB0` or `/dev/ttyACM0`.
 - `STEPPER_PI_HOME`: root folder for routines, pictures, database, and logs.
 - `STEPPER_BLUE_LIGHT_PIN`: BCM GPIO pin for the blue light.

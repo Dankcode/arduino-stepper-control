@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PI_HOST="${PI_HOST:-raspberrypi.local}"
+PI_HOST="${PI_HOST:-192.168.1.43}"
 PI_USER="${PI_USER:-dank}"
 PI_BACKEND_DIR="${PI_BACKEND_DIR:-/home/dank/backend}"
 

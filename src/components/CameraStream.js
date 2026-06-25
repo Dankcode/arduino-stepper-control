@@ -26,7 +26,7 @@ const CameraStream = ({ PI_BACKEND_URL }) => {
 
   return (
     <div className="cs-container">
-      <style>{`
+      <style jsx global>{`
         .cs-container {
           display: flex;
           flex-direction: column;

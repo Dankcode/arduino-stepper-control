@@ -191,7 +191,7 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
 
   return (
     <div className="container">
-      <style>{`
+      <style jsx global>{`
         .container { 
           display: flex; 
           flex-direction: column; 

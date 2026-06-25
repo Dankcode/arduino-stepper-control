@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import MergedPlateTable from './MergedPlateTable';
 import { wellSchema } from './plateSchema';
 
@@ -55,7 +55,7 @@ const RoutineBuilder = ({ PI_BACKEND_URL }) => {
   // State for the coordinates of the currently selected well (for single well input/copy source)
   const [selectedWellCoords, setSelectedWellCoords] = useState(null);
   // State for the custom filename
-  const [filename, setFilename] = useState(createDefaultFilename());
+  const [filename, setFilename] = useState('');
   // State for displaying messages to the user (e.g., success/error)
   const [message, setMessage] = useState('');
   // State to indicate if an action is in progress
@@ -67,6 +67,10 @@ const RoutineBuilder = ({ PI_BACKEND_URL }) => {
   const [repeatCount, setRepeatCount] = useState(1);
   const [startTime, setStartTime] = useState('09:00');
   const [repeatInterval, setRepeatInterval] = useState('daily');
+
+  useEffect(() => {
+    setFilename(createDefaultFilename());
+  }, []);
 
   // A memoized map of quadrant properties for easy access
   const quadrantMap = {
@@ -335,7 +339,7 @@ const RoutineBuilder = ({ PI_BACKEND_URL }) => {
   };
   return (
     <div className="routine-builder-container">
-      <style>{`
+      <style jsx global>{`
         .routine-builder-container {
           display: flex;
           height: 100vh;

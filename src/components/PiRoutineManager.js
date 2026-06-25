@@ -3,6 +3,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 
+const WEEKDAYS = [
+  { value: 1, label: 'Monday' },
+  { value: 2, label: 'Tuesday' },
+  { value: 3, label: 'Wednesday' },
+  { value: 4, label: 'Thursday' },
+  { value: 5, label: 'Friday' },
+  { value: 6, label: 'Saturday' },
+  { value: 7, label: 'Sunday' },
+];
+
 /**
  * PiRoutineManager component to manage routines on the Raspberry Pi backend.
  * It handles fetching, saving, renaming, and deleting routines via API calls.
@@ -124,7 +134,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
    * @param {Array} allRoutinesData - The list of all routines with their runtimes.
    * @returns {boolean} True if an overlap is found, false otherwise.
    */
-  const checkOverlap = (checkingRoutineName, newTime24, runtimeSeconds, currentActiveRoutines, allRoutinesData) => {
+  const checkOverlap = (checkingRoutineName, newDay, newTime24, runtimeSeconds, currentActiveRoutines, allRoutinesData) => {
     // Get new routine's start and end times in minutes past midnight (0-1440)
     const newStartMinutes = militaryTimeToMinutes(newTime24);
     const newDurationMinutes = Math.ceil(runtimeSeconds / 60);
@@ -134,6 +144,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     for (const routine of currentActiveRoutines) {
       // Skip the routine being checked against itself
       if (routine.name === checkingRoutineName) continue;
+      if (Number(routine.day) !== Number(newDay)) continue;
 
       // 1. Get the conflicting routine's runtime
       const otherRoutineData = allRoutinesData.find(r => r.name.replace('.sql', '') === routine.name);
@@ -284,8 +295,9 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
       const local = localSchedule[routineName];
       const initial = initialLocalSchedule[routineName];
 
-      // Check if any time component differs
+      // Check if any schedule component differs.
       if (local && initial && (
+        Number(local.day) !== Number(initial.day) ||
         local.time12 !== initial.time12 ||
         local.minute !== initial.minute ||
         local.period !== initial.period)
@@ -321,8 +333,11 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
         return null;
       }
 
-      // If time has changed, add it to the list of API updates
-      if (time24Hour !== initial?.time24) {
+      // Save changes to either the weekday or clock time.
+      if (
+        Number(local.day) !== Number(initial?.day) ||
+        time24Hour !== initial?.time24
+      ) {
         updatesToPerform.push({
           routineName,
           newTime24Hour: time24Hour,
@@ -350,7 +365,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     // 2. Perform Overlap Check against the proposed schedule
     for (const update of updatesToPerform) {
       // Pass the ENTIRE proposedActiveRoutines list for comparison
-      if (checkOverlap(update.routineName, update.newTime24Hour, update.runtime, proposedActiveRoutines, allRoutines)) {
+      if (checkOverlap(update.routineName, update.newDay, update.newTime24Hour, update.runtime, proposedActiveRoutines, allRoutines)) {
         // --- MODIFIED LOGIC HERE: Revert ALL changes on conflict ---
 
         // CONFLICT FOUND: Display error and revert ALL local changes
@@ -493,6 +508,8 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
     let finalValue = value;
     if (key === 'time12' || key === 'minute') {
       finalValue = value.replace(/[^0-9]/g, '').slice(0, 2);
+    } else if (key === 'day') {
+      finalValue = Number(value);
     }
 
     setLocalSchedule(prev => ({
@@ -550,7 +567,7 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
   return (
     <div className="main-container">
       {/* --- CSS Style Block (Modified for Logs and Global Save Button) --- */}
-      <style>{`
+      <style jsx global>{`
         .main-container {
             padding: 1.5rem;
             max-width: 1400px;
@@ -828,6 +845,17 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
             font-size: 0.85rem;
             font-weight: 600;
         }
+        .weekday-select {
+            min-width: 7.5rem;
+            padding: 0.4rem;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 0.375rem;
+            color: #f8fafc;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
         .global-save-button {
             padding: 0.75rem 2.5rem;
             background: linear-gradient(135deg, #0ea5e9, #0284c7);
@@ -1031,7 +1059,8 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
 
                 // Check if this routine has unsaved local changes to highlight the input
                 const hasLocalChange = hasUnsavedChanges &&
-                  (localSchedule[routine.name]?.time12 !== initialLocalSchedule[routine.name]?.time12 ||
+                  (Number(localSchedule[routine.name]?.day) !== Number(initialLocalSchedule[routine.name]?.day) ||
+                    localSchedule[routine.name]?.time12 !== initialLocalSchedule[routine.name]?.time12 ||
                     localSchedule[routine.name]?.minute !== initialLocalSchedule[routine.name]?.minute ||
                     localSchedule[routine.name]?.period !== initialLocalSchedule[routine.name]?.period);
 
@@ -1060,7 +1089,21 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
                         )}
                         {/* Display the local 12-hour time and inputs */}
                         <div className="input-group" style={{ marginTop: '0.75rem' }}>
-                          <label>Start Time:</label>
+                          <label>Run:</label>
+
+                          <select
+                            value={scheduleData.day || routine.day}
+                            onChange={(e) => onLocalUpdateActiveRoutine(routine.name, 'day', e.target.value)}
+                            className="weekday-select"
+                            style={hasLocalChange ? { border: '1px solid #3b82f6' } : {}}
+                            aria-label={`${routine.name} weekday`}
+                          >
+                            {WEEKDAYS.map((day) => (
+                              <option key={day.value} value={day.value}>
+                                {day.label}
+                              </option>
+                            ))}
+                          </select>
 
                           {/* Hour Input (Numerical) */}
                           <input

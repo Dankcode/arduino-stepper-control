@@ -459,8 +459,13 @@ def update_routine_schedule():
         
     try:
         schedule_day = int(day)
+        if schedule_day < 1 or schedule_day > 7:
+            raise ValueError("Day must be between 1 (Monday) and 7 (Sunday).")
         if not time.count(':') == 1 or len(time) != 5:
             raise ValueError("Time format is invalid. Must be HH:MM.")
+        hour, minute = map(int, time.split(':'))
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError("Time must be a valid 24-hour value.")
             
         conn = get_db_connection()
         cursor = conn.cursor()

@@ -2,8 +2,9 @@
 Description=Run Microscope Stepper Scheduler Every Minute
 
 [Timer]
-OnBootSec=30
-OnUnitActiveSec=60
+OnCalendar=*-*-* *:*:00
+Persistent=true
+AccuracySec=1s
 Unit=stepper-scheduler.service
 
 [Install]
