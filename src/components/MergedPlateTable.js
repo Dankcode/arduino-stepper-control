@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 
 const MergedPlateTable = ({
   quadrantLayouts,
@@ -47,6 +47,20 @@ const MergedPlateTable = ({
     }
     return { rows: 0, cols: 0 }; // 'none' layout has 0 dimensions
   };
+
+  const quadrantFrames = useMemo(() => {
+    const dims = Object.fromEntries(
+      Object.entries(quadrantLayouts).map(([quadrant, layout]) => [quadrant, getLayoutDimensions(layout)])
+    );
+    const topRows = Math.max(dims.topLeft.rows, dims.topRight.rows);
+    const leftCols = Math.max(dims.topLeft.cols, dims.bottomLeft.cols);
+    return {
+      topLeft: { startRow: 0, startCol: 0, ...dims.topLeft },
+      topRight: { startRow: 0, startCol: leftCols, ...dims.topRight },
+      bottomLeft: { startRow: topRows, startCol: 0, ...dims.bottomLeft },
+      bottomRight: { startRow: topRows, startCol: leftCols, ...dims.bottomRight },
+    };
+  }, [quadrantLayouts]);
 
   /**
    * Helper function to check if a cell is in the selected range.
@@ -113,32 +127,7 @@ const MergedPlateTable = ({
     const dragStartQuadrant = getQuadrantFromCoords(dragStart.row, dragStart.col);
     const currentQuadrant = getQuadrantFromCoords(rowIndex, colIndex);
 
-    if (dragStartQuadrant !== currentQuadrant) {
-      let clampedRowIndex = rowIndex;
-      let clampedColIndex = colIndex;
-
-      const isTop = dragStartQuadrant.includes('top');
-      const isLeft = dragStartQuadrant.includes('Left');
-
-      const { rows: quadRows, cols: quadCols } = getLayoutDimensions(quadrantLayouts[dragStartQuadrant]);
-
-      if (isTop) {
-        clampedRowIndex = Math.min(rowIndex, dragStart.row + quadRows - 1);
-      } else {
-        clampedRowIndex = Math.max(rowIndex, dragStart.row);
-      }
-      if (isLeft) {
-        clampedColIndex = Math.min(colIndex, dragStart.col + quadCols - 1);
-      } else {
-        clampedColIndex = Math.max(colIndex, dragStart.col);
-      }
-
-      setSelectedRange({
-        startRow: dragStart.row,
-        endRow: clampedRowIndex,
-        startCol: dragStart.col,
-        endCol: clampedColIndex,
-      });
+    if (!dragStartQuadrant || dragStartQuadrant !== currentQuadrant) {
       return;
     }
 
@@ -152,7 +141,7 @@ const MergedPlateTable = ({
     if (onRangeChange) {
       onRangeChange(newRange);
     }
-  }, [isDragging, dragStart, quadrantLayouts, onRangeChange]);
+  }, [isDragging, dragStart, onRangeChange]);
 
   /**
    * Handles the mouse up event, ending the drag selection.
@@ -166,10 +155,18 @@ const MergedPlateTable = ({
    * Helper function to determine the quadrant from global coordinates.
    */
   const getQuadrantFromCoords = (row, col) => {
-    if (row < 8 && col < 12) return 'topLeft';
-    if (row < 8 && col >= 12) return 'topRight';
-    if (row >= 8 && col < 12) return 'bottomLeft';
-    if (row >= 8 && col >= 12) return 'bottomRight';
+    for (const [quadrant, frame] of Object.entries(quadrantFrames)) {
+      if (
+        frame.rows > 0 &&
+        frame.cols > 0 &&
+        row >= frame.startRow &&
+        row < frame.startRow + frame.rows &&
+        col >= frame.startCol &&
+        col < frame.startCol + frame.cols
+      ) {
+        return quadrant;
+      }
+    }
     return null;
   };
 
@@ -188,8 +185,8 @@ const MergedPlateTable = ({
     const quadrant = getQuadrantFromCoords(minRow, minCol);
     if (!quadrant || !quadrantData[quadrant]) return;
 
-    const quadrantStartRow = quadrant.includes('bottom') ? 8 : 0;
-    const quadrantStartCol = quadrant.includes('Right') ? 12 : 0;
+    const quadrantStartRow = quadrantFrames[quadrant].startRow;
+    const quadrantStartCol = quadrantFrames[quadrant].startCol;
 
     const copiedCells = [];
 
@@ -204,7 +201,7 @@ const MergedPlateTable = ({
     }
     setCopiedRangeData(copiedCells);
     setCopiedRangeCoords(selectedRange);
-  }, [selectedRange, quadrantData]);
+  }, [selectedRange, quadrantData, quadrantFrames]);
 
   /**
    * Handles the paste operation.
@@ -221,8 +218,8 @@ const MergedPlateTable = ({
     const quadrant = getQuadrantFromCoords(pasteMinRow, pasteMinCol);
     if (!quadrant || !quadrantData[quadrant]) return;
 
-    const quadrantStartRow = quadrant.includes('bottom') ? 8 : 0;
-    const quadrantStartCol = quadrant.includes('Right') ? 12 : 0;
+    const quadrantStartRow = quadrantFrames[quadrant].startRow;
+    const quadrantStartCol = quadrantFrames[quadrant].startCol;
 
     const newQuadrantData = quadrantData[quadrant].map(row => [...row]); // Deep copy
 
@@ -246,7 +243,7 @@ const MergedPlateTable = ({
     setQuadrantData(prev => ({ ...prev, [quadrant]: newQuadrantData }));
     setSelectedRange(null);
     setCopiedRangeCoords(null);
-  }, [selectedRange, copiedRangeData, quadrantData, setQuadrantData]);
+  }, [selectedRange, copiedRangeData, quadrantData, setQuadrantData, quadrantFrames]);
 
   /**
    * Handles the change event on an input field to update the parameter value.
@@ -289,22 +286,22 @@ const MergedPlateTable = ({
     }
   };
 
-  // Effect hook for keyboard shortcuts
-  useEffect(() => {
-    const handleGlobalKeyDown = (event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key === 'c') {
-        event.preventDefault();
-        handleCopy();
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key === 'v') {
-        event.preventDefault();
-        handlePaste();
-      }
-    };
-    document.addEventListener('keydown', handleGlobalKeyDown);
-    return () => {
-      document.removeEventListener('keydown', handleGlobalKeyDown);
-    };
+  const handleTableKeyDown = useCallback((event) => {
+    const target = event.target;
+    const isEditable = target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      target?.isContentEditable;
+    if (isEditable) return;
+
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+      event.preventDefault();
+      handleCopy();
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+      event.preventDefault();
+      handlePaste();
+    }
   }, [handleCopy, handlePaste]);
 
   // Effect hook for global mouse up listener
@@ -592,11 +589,12 @@ const MergedPlateTable = ({
         className={`merged-plate-table-wrapper ${isDragging ? 'dragging' : ''}`}
         ref={tableRef}
         tabIndex={0}
+        onKeyDown={handleTableKeyDown}
       >
-        {renderQuadrant('topLeft', 0, 0)}
-        {renderQuadrant('topRight', 0, 12)}
-        {renderQuadrant('bottomLeft', 8, 0)}
-        {renderQuadrant('bottomRight', 8, 12)}
+        {renderQuadrant('topLeft', quadrantFrames.topLeft.startRow, quadrantFrames.topLeft.startCol)}
+        {renderQuadrant('topRight', quadrantFrames.topRight.startRow, quadrantFrames.topRight.startCol)}
+        {renderQuadrant('bottomLeft', quadrantFrames.bottomLeft.startRow, quadrantFrames.bottomLeft.startCol)}
+        {renderQuadrant('bottomRight', quadrantFrames.bottomRight.startRow, quadrantFrames.bottomRight.startCol)}
       </div>
     </div>
   );

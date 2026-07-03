@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import MergedPlateTable from './MergedPlateTable';
-import { wellSchema } from './plateSchema';
+import { wellSchema } from './plateSchema.js';
 
 // Helper function to get row and column counts for a given layout.
 const getLayoutDimensions = (layout) => {

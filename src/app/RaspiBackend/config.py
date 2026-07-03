@@ -6,7 +6,7 @@ BASE_DIR = Path(__file__).resolve().parent
 PI_HOME = Path(os.getenv("STEPPER_PI_HOME", "/home/dank"))
 
 SERIAL_PORT = os.getenv("STEPPER_SERIAL_PORT", "/dev/ttyUSB0")
-BAUD_RATE = int(os.getenv("STEPPER_BAUD_RATE", "9600"))
+BAUD_RATE = int(os.getenv("STEPPER_BAUD_RATE", "115200"))
 SERIAL_TIMEOUT = float(os.getenv("STEPPER_SERIAL_TIMEOUT", "1.5"))
 
 ROUTINES_DIR = Path(os.getenv("STEPPER_ROUTINES_DIR", PI_HOME / "routines"))

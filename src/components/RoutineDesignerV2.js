@@ -1,0 +1,869 @@
+'use client';
+
+import React, {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
+import { Check, ChevronLeft, ChevronRight, Save, Upload } from 'lucide-react';
+import ProgressBar from './ui/ProgressBar';
+import { useToast } from './ui/StatusToast';
+import { colors, font, radii, shadows, motion } from './ui/tokens';
+
+const QUADRANTS = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+const QUADRANT_LABELS = {
+  topLeft: 'Plate 1',
+  topRight: 'Plate 2',
+  bottomLeft: 'Plate 3',
+  bottomRight: 'Plate 4',
+};
+const QUADRANT_PLATE_NUMBER = { topLeft: 1, topRight: 2, bottomLeft: 3, bottomRight: 4 };
+const PARAMS = [
+  ['stepAmount', 'Steps', 'steps'],
+  ['delayBetweenStep', 'Delay', 'ms'],
+  ['lightTime', 'Light', 'ms'],
+  ['exposureTime', 'Exposure', 'us'],
+];
+const DEFAULT_WELL = {
+  stepAmount: 0,
+  delayBetweenStep: 0,
+  lightTime: 0,
+  exposureTime: 0,
+  switchPlate: false,
+};
+
+const createDefaultFilename = () => {
+  const now = new Date();
+  const date = now.toISOString().split('T')[0];
+  const time = now.toTimeString().split(' ')[0].replace(/:/g, '-');
+  return `${date}-${time}`;
+};
+
+const getLayoutDimensions = (layout) => {
+  if (layout === '96-well') return { rows: 8, cols: 12 };
+  if (layout === '48-well') return { rows: 6, cols: 8 };
+  return { rows: 0, cols: 0 };
+};
+
+const createPlate = (layout) => {
+  const { rows, cols } = getLayoutDimensions(layout);
+  return {
+    layout,
+    wells: Array.from({ length: rows }, () =>
+      Array.from({ length: cols }, () => ({ ...DEFAULT_WELL }))
+    ),
+  };
+};
+
+const initialState = {
+  plates: {
+    topLeft: createPlate('96-well'),
+    topRight: null,
+    bottomLeft: null,
+    bottomRight: null,
+  },
+  selection: null,
+  activeParam: 'stepAmount',
+  filename: createDefaultFilename(),
+  schedule: { repeatCount: 1, startTime: '09:00', repeatInterval: 'daily' },
+  saveState: 'idle',
+  inspectorOpen: true,
+};
+
+const selectionKey = (row, col) => `${row},${col}`;
+const parseSelectionKey = (key) => key.split(',').map(Number);
+const sanitizeFilename = (value) => value.replace(/[^a-zA-Z0-9-_.]/g, '');
+
+function reducer(state, action) {
+  switch (action.type) {
+    case 'SET_LAYOUT': {
+      const plate = action.layout === 'none' ? null : createPlate(action.layout);
+      return {
+        ...state,
+        plates: { ...state.plates, [action.quadrant]: plate },
+        selection: state.selection?.quadrant === action.quadrant ? null : state.selection,
+      };
+    }
+    case 'SELECT':
+      return { ...state, selection: { quadrant: action.quadrant, cells: action.cells } };
+    case 'APPLY_PARAM': {
+      const selection = state.selection;
+      if (!selection || selection.cells.size === 0) return state;
+      const plate = state.plates[selection.quadrant];
+      if (!plate) return state;
+      const nextWells = plate.wells.map((row, rowIndex) =>
+        row.map((well, colIndex) => {
+          if (!selection.cells.has(selectionKey(rowIndex, colIndex))) return well;
+          const value = action.param === 'switchPlate'
+            ? Boolean(action.value)
+            : Math.max(0, Number(action.value) || 0);
+          return { ...well, [action.param]: value };
+        })
+      );
+      return {
+        ...state,
+        plates: {
+          ...state.plates,
+          [selection.quadrant]: { ...plate, wells: nextWells },
+        },
+        saveState: 'idle',
+      };
+    }
+    case 'IMPORT_JSON':
+      return {
+        ...state,
+        plates: action.plates,
+        filename: action.filename || state.filename,
+        saveState: 'idle',
+        selection: null,
+      };
+    case 'SET_FILENAME':
+      return { ...state, filename: sanitizeFilename(action.filename), saveState: 'idle' };
+    case 'SET_SCHEDULE':
+      return { ...state, schedule: { ...state.schedule, ...action.schedule }, saveState: 'idle' };
+    case 'SET_ACTIVE_PARAM':
+      return { ...state, activeParam: action.param };
+    case 'SET_SAVE_STATE':
+      return { ...state, saveState: action.saveState };
+    case 'TOGGLE_INSPECTOR':
+      return { ...state, inspectorOpen: !state.inspectorOpen };
+    default:
+      return state;
+  }
+}
+
+const flattenPlates = (plates) => {
+  const rows = [];
+  QUADRANTS.forEach((quadrant) => {
+    const plate = plates[quadrant];
+    if (!plate) return;
+    plate.wells.forEach((row, rowIndex) => {
+      row.forEach((well, colIndex) => {
+        rows.push({
+          plateNumber: QUADRANT_PLATE_NUMBER[quadrant],
+          wellId: `${String.fromCharCode(65 + rowIndex)}${colIndex + 1}`,
+          layout: plate.layout,
+          stepAmount: Number(well.stepAmount) || 0,
+          delayBetweenStep: Number(well.delayBetweenStep) || 0,
+          lightTime: Number(well.lightTime) || 0,
+          exposureTime: Number(well.exposureTime) || 0,
+          switchPlate: well.switchPlate ? 1 : 0,
+        });
+      });
+    });
+  });
+  return rows;
+};
+
+const hydrateImport = (payload) => {
+  const plates = { topLeft: null, topRight: null, bottomLeft: null, bottomRight: null };
+  const plateToQuadrant = { 1: 'topLeft', 2: 'topRight', 3: 'bottomLeft', 4: 'bottomRight' };
+  (payload.well_data || []).forEach((item) => {
+    const quadrant = plateToQuadrant[item.plateNumber] || 'topLeft';
+    const layout = item.layout || '96-well';
+    if (!plates[quadrant]) plates[quadrant] = createPlate(layout);
+    const row = item.wellId.charAt(0).toUpperCase().charCodeAt(0) - 65;
+    const col = Number(item.wellId.slice(1)) - 1;
+    if (plates[quadrant].wells[row]?.[col]) {
+      plates[quadrant].wells[row][col] = {
+        stepAmount: Number(item.stepAmount) || 0,
+        delayBetweenStep: Number(item.delayBetweenStep) || 0,
+        lightTime: Number(item.lightTime) || 0,
+        exposureTime: Number(item.exposureTime) || 0,
+        switchPlate: item.switchPlate === 1 || item.switchPlate === true,
+      };
+    }
+  });
+  if (!Object.values(plates).some(Boolean)) plates.topLeft = createPlate('96-well');
+  return plates;
+};
+
+const useRuntimeEstimate = (PI_BACKEND_URL, plates) => {
+  const [estimate, setEstimate] = useState({ seconds: 0, loading: false, source: 'local' });
+  const payload = useMemo(() => flattenPlates(plates), [plates]);
+
+  useEffect(() => {
+    let canceled = false;
+    const localSeconds = payload.reduce((sum, well) => {
+      if (!well.stepAmount) return sum;
+      return sum + well.delayBetweenStep / 1000 + well.lightTime / 1000 + well.exposureTime / 1_000_000;
+    }, 0);
+
+    setEstimate({ seconds: localSeconds, loading: Boolean(PI_BACKEND_URL), source: 'local' });
+    if (!PI_BACKEND_URL) return undefined;
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch(`${PI_BACKEND_URL}/api/motion/estimate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ well_data: payload }),
+        });
+        const data = await response.json();
+        if (!canceled && response.ok) {
+          setEstimate({ seconds: Number(data.seconds) || 0, loading: false, source: 'backend' });
+        }
+      } catch (_error) {
+        if (!canceled) setEstimate({ seconds: localSeconds, loading: false, source: 'local' });
+      }
+    }, 500);
+
+    return () => {
+      canceled = true;
+      window.clearTimeout(timer);
+    };
+  }, [PI_BACKEND_URL, payload]);
+
+  return estimate;
+};
+
+const useSelectionValues = (plates, selection) => useMemo(() => {
+  if (!selection || selection.cells.size === 0) return {};
+  const plate = plates[selection.quadrant];
+  if (!plate) return {};
+
+  return [...PARAMS.map(([param]) => param), 'switchPlate'].reduce((acc, param) => {
+    const values = Array.from(selection.cells).map((key) => {
+      const [row, col] = parseSelectionKey(key);
+      return plate.wells[row]?.[col]?.[param];
+    });
+    const first = values[0];
+    acc[param] = values.every(value => value === first) ? first : 'mixed';
+    return acc;
+  }, {});
+}, [plates, selection]);
+
+const formatSeconds = (value) => {
+  const total = Math.max(0, Math.round(value));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+};
+
+const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, onSave, onImport }) {
+  return (
+    <div style={styles.toolbar}>
+      <input
+        value={state.filename}
+        onChange={(event) => dispatch({ type: 'SET_FILENAME', filename: event.target.value })}
+        placeholder="routine-name"
+        style={styles.filenameInput}
+      />
+      <button type="button" onClick={onSave} disabled={saving || !state.filename} style={styles.primaryButton}>
+        {saving ? <ProgressBar size="sm" /> : <><Save size={16} /> Save</>}
+      </button>
+      <label style={styles.secondaryButton}>
+        <Upload size={16} />
+        Import
+        <input type="file" accept="application/json,.json" onChange={onImport} style={{ display: 'none' }} />
+      </label>
+      <select
+        value={state.schedule.repeatInterval}
+        onChange={(event) => dispatch({ type: 'SET_SCHEDULE', schedule: { repeatInterval: event.target.value } })}
+        style={styles.select}
+      >
+        <option value="once">Once</option>
+        <option value="daily">Daily</option>
+        <option value="hourly">Hourly</option>
+      </select>
+      <input
+        type="time"
+        value={state.schedule.startTime}
+        onChange={(event) => dispatch({ type: 'SET_SCHEDULE', schedule: { startTime: event.target.value } })}
+        style={styles.timeInput}
+      />
+      <div style={styles.runtimeChip}>
+        {runtime.loading ? 'Estimating...' : `Runtime ${formatSeconds(runtime.seconds)}`}
+      </div>
+    </div>
+  );
+});
+
+const WellCell = memo(function WellCell({ row, col, well, selected, activeParam, maxValue, onPointerDown, onPointerEnter }) {
+  const value = Number(well[activeParam]) || 0;
+  const alpha = maxValue > 0 ? Math.min(0.9, 0.12 + (value / maxValue) * 0.65) : 0;
+  return (
+    <button
+      type="button"
+      title={`${String.fromCharCode(65 + row)}${col + 1}: ${activeParam} ${value}`}
+      onMouseDown={() => onPointerDown(row, col)}
+      onMouseEnter={() => onPointerEnter(row, col)}
+      style={{
+        ...styles.wellCell,
+        background: value > 0 ? `rgba(14, 165, 233, ${alpha})` : colors.surface1,
+        outline: selected ? `2px solid ${colors.textHi}` : '1px solid rgba(51,65,85,0.8)',
+      }}
+    >
+      {value > 0 ? value : ''}
+    </button>
+  );
+});
+
+const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef }) {
+  const dragRef = useRef(null);
+  const canvasRef = useRef(null);
+  const activePlates = QUADRANTS.filter(quadrant => state.plates[quadrant]);
+  const maxValue = useMemo(() => {
+    let max = 0;
+    activePlates.forEach((quadrant) => {
+      state.plates[quadrant].wells.forEach(row => row.forEach((well) => {
+        max = Math.max(max, Number(well[state.activeParam]) || 0);
+      }));
+    });
+    return max;
+  }, [activePlates, state.activeParam, state.plates]);
+
+  const commitRange = useCallback((quadrant, start, end) => {
+    const plate = state.plates[quadrant];
+    if (!plate) return;
+    const minRow = Math.max(0, Math.min(start.row, end.row));
+    const maxRow = Math.min(plate.wells.length - 1, Math.max(start.row, end.row));
+    const minCol = Math.max(0, Math.min(start.col, end.col));
+    const maxCol = Math.min(plate.wells[0].length - 1, Math.max(start.col, end.col));
+    const cells = new Set();
+    for (let row = minRow; row <= maxRow; row += 1) {
+      for (let col = minCol; col <= maxCol; col += 1) cells.add(selectionKey(row, col));
+    }
+    dispatch({ type: 'SELECT', quadrant, cells });
+  }, [dispatch, state.plates]);
+
+  const handleCopy = useCallback(() => {
+    const selection = state.selection;
+    if (!selection) return;
+    const plate = state.plates[selection.quadrant];
+    if (!plate) return;
+    const points = Array.from(selection.cells).map(parseSelectionKey);
+    const minRow = Math.min(...points.map(([row]) => row));
+    const maxRow = Math.max(...points.map(([row]) => row));
+    const minCol = Math.min(...points.map(([, col]) => col));
+    const maxCol = Math.max(...points.map(([, col]) => col));
+    clipboardRef.current = {
+      rows: Array.from({ length: maxRow - minRow + 1 }, (_, rowOffset) =>
+        Array.from({ length: maxCol - minCol + 1 }, (_, colOffset) => ({
+          ...plate.wells[minRow + rowOffset][minCol + colOffset],
+        }))
+      ),
+    };
+  }, [clipboardRef, state.plates, state.selection]);
+
+  const handlePaste = useCallback(() => {
+    const clip = clipboardRef.current;
+    const selection = state.selection;
+    if (!clip || !selection) return;
+    const [startRow, startCol] = parseSelectionKey(selection.cells.values().next().value);
+    clip.rows.forEach((row, rowOffset) => {
+      row.forEach((well, colOffset) => {
+        dispatch({
+          type: 'SELECT',
+          quadrant: selection.quadrant,
+          cells: new Set([selectionKey(startRow + rowOffset, startCol + colOffset)]),
+        });
+        Object.entries(well).forEach(([param, value]) => {
+          dispatch({ type: 'APPLY_PARAM', param, value });
+        });
+      });
+    });
+  }, [clipboardRef, dispatch, state.selection]);
+
+  const handleKeyDown = useCallback((event) => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
+      event.preventDefault();
+      handleCopy();
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'v') {
+      event.preventDefault();
+      handlePaste();
+    }
+  }, [handleCopy, handlePaste]);
+
+  return (
+    <div ref={canvasRef} tabIndex={0} onKeyDown={handleKeyDown} style={styles.canvas}>
+      <div style={{
+        ...styles.plateGrid,
+        gridTemplateColumns: activePlates.length === 1 ? 'minmax(320px, 720px)' : 'repeat(2, minmax(260px, 1fr))',
+      }}>
+        {QUADRANTS.map((quadrant) => {
+          const plate = state.plates[quadrant];
+          if (!plate) {
+            return (
+              <button
+                key={quadrant}
+                type="button"
+                onClick={() => dispatch({ type: 'SET_LAYOUT', quadrant, layout: '96-well' })}
+                style={styles.emptyPlate}
+              >
+                {QUADRANT_LABELS[quadrant]}
+              </button>
+            );
+          }
+          const { rows, cols } = getLayoutDimensions(plate.layout);
+          return (
+            <section key={quadrant} style={styles.plateSection}>
+              <div style={styles.plateHeader}>
+                <span>{QUADRANT_LABELS[quadrant]}</span>
+                <select
+                  value={plate.layout}
+                  onChange={(event) => dispatch({ type: 'SET_LAYOUT', quadrant, layout: event.target.value })}
+                  style={styles.smallSelect}
+                >
+                  <option value="none">Empty</option>
+                  <option value="48-well">48-well</option>
+                  <option value="96-well">96-well</option>
+                </select>
+              </div>
+              <div style={{ ...styles.wellGrid, gridTemplateColumns: `24px repeat(${cols}, minmax(24px, 1fr))` }}>
+                <div />
+                {Array.from({ length: cols }, (_, col) => <div key={col} style={styles.axisLabel}>{col + 1}</div>)}
+                {Array.from({ length: rows }, (_, row) => (
+                  <React.Fragment key={row}>
+                    <div style={styles.axisLabel}>{String.fromCharCode(65 + row)}</div>
+                    {Array.from({ length: cols }, (_, col) => (
+                      <WellCell
+                        key={`${row}-${col}`}
+                        row={row}
+                        col={col}
+                        well={plate.wells[row][col]}
+                        activeParam={state.activeParam}
+                        maxValue={maxValue}
+                        selected={state.selection?.quadrant === quadrant && state.selection.cells.has(selectionKey(row, col))}
+                        onPointerDown={(r, c) => {
+                          dragRef.current = { quadrant, start: { row: r, col: c } };
+                          commitRange(quadrant, { row: r, col: c }, { row: r, col: c });
+                        }}
+                        onPointerEnter={(r, c) => {
+                          if (dragRef.current?.quadrant === quadrant) {
+                            window.requestAnimationFrame(() => commitRange(quadrant, dragRef.current.start, { row: r, col: c }));
+                          }
+                        }}
+                      />
+                    ))}
+                  </React.Fragment>
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      <div onMouseUp={() => { dragRef.current = null; }} style={styles.mouseUpCatcher} />
+    </div>
+  );
+});
+
+const Inspector = memo(function Inspector({ state, values, dispatch }) {
+  if (!state.inspectorOpen) {
+    return (
+      <button type="button" onClick={() => dispatch({ type: 'TOGGLE_INSPECTOR' })} style={styles.inspectorTab}>
+        <ChevronLeft size={16} />
+      </button>
+    );
+  }
+
+  const count = state.selection?.cells.size || 0;
+  const selectionLabel = count > 0 ? `${count} well${count === 1 ? '' : 's'} selected` : 'No wells selected';
+
+  return (
+    <aside style={styles.inspector}>
+      <button type="button" onClick={() => dispatch({ type: 'TOGGLE_INSPECTOR' })} style={styles.collapseButton}>
+        <ChevronRight size={16} />
+      </button>
+      <h2 style={styles.inspectorTitle}>{selectionLabel}</h2>
+      <div style={styles.segmented}>
+        {PARAMS.map(([param, label]) => (
+          <button
+            key={param}
+            type="button"
+            onClick={() => dispatch({ type: 'SET_ACTIVE_PARAM', param })}
+            style={state.activeParam === param ? styles.segmentActive : styles.segment}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {PARAMS.map(([param, label, unit]) => (
+        <label key={param} style={styles.field}>
+          <span>{label}</span>
+          <div style={styles.numberWrap}>
+            <input
+              type="number"
+              min="0"
+              disabled={!count}
+              value={values[param] === 'mixed' || values[param] === undefined ? '' : values[param]}
+              placeholder={values[param] === 'mixed' ? '-' : '0'}
+              onChange={(event) => dispatch({ type: 'APPLY_PARAM', param, value: event.target.value })}
+              style={styles.numberInput}
+            />
+            <span style={styles.unit}>{unit}</span>
+          </div>
+        </label>
+      ))}
+      <label style={styles.toggleRow}>
+        <input
+          type="checkbox"
+          disabled={!count}
+          checked={values.switchPlate === 'mixed' ? false : Boolean(values.switchPlate)}
+          onChange={(event) => dispatch({ type: 'APPLY_PARAM', param: 'switchPlate', value: event.target.checked })}
+        />
+        Switch plate after this well
+      </label>
+    </aside>
+  );
+});
+
+const StatusBar = memo(function StatusBar({ state }) {
+  const activeWellCount = flattenPlates(state.plates).filter(well => well.stepAmount > 0).length;
+  const warnings = [];
+  if (!state.filename) warnings.push('Routine name required');
+  if (activeWellCount === 0) warnings.push('No active wells');
+  const saveText = state.saveState === 'saved' ? 'Saved' : state.saveState === 'error' ? 'Save failed' : 'Ready';
+  return (
+    <div style={styles.statusBar}>
+      <span>{activeWellCount} active wells</span>
+      <span>{warnings[0] || 'Validation clear'}</span>
+      <span style={{ color: state.saveState === 'saved' ? colors.success : colors.textMid }}>
+        {state.saveState === 'saved' ? <Check size={14} /> : null}
+        {saveText}
+      </span>
+    </div>
+  );
+});
+
+const RoutineDesignerV2 = ({ PI_BACKEND_URL }) => {
+  const [state, dispatch] = useReducer(reducer, initialState);
+  const [saving, setSaving] = useState(false);
+  const clipboardRef = useRef(null);
+  const toast = useToast();
+  const runtime = useRuntimeEstimate(PI_BACKEND_URL, state.plates);
+  const values = useSelectionValues(state.plates, state.selection);
+
+  const handleSave = useCallback(async () => {
+    if (!state.filename) {
+      toast.error('Routine name is required.');
+      return;
+    }
+    setSaving(true);
+    dispatch({ type: 'SET_SAVE_STATE', saveState: 'saving' });
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/save_routine_sql`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: state.filename,
+          well_data: flattenPlates(state.plates),
+          repeatCount: Number(state.schedule.repeatCount) || 1,
+          startTime: state.schedule.startTime,
+          repeatInterval: state.schedule.repeatInterval,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Save failed.');
+      dispatch({ type: 'SET_SAVE_STATE', saveState: 'saved' });
+      toast.success(data.message || 'Routine saved.');
+    } catch (error) {
+      dispatch({ type: 'SET_SAVE_STATE', saveState: 'error' });
+      toast.error(error.message);
+    } finally {
+      setSaving(false);
+    }
+  }, [PI_BACKEND_URL, state.filename, state.plates, state.schedule, toast]);
+
+  const handleImport = useCallback((event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const payload = JSON.parse(reader.result);
+        dispatch({
+          type: 'IMPORT_JSON',
+          plates: hydrateImport(payload),
+          filename: sanitizeFilename(payload.filename || file.name.replace(/\.json$/i, '')),
+        });
+        toast.success('Routine imported.');
+      } catch (error) {
+        toast.error(`Import failed: ${error.message}`);
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+  }, [toast]);
+
+  return (
+    <div style={styles.root}>
+      <Toolbar state={state} dispatch={dispatch} runtime={runtime} saving={saving} onSave={handleSave} onImport={handleImport} />
+      <main style={styles.main}>
+        <PlateCanvas state={state} dispatch={dispatch} clipboardRef={clipboardRef} />
+        <Inspector state={state} values={values} dispatch={dispatch} />
+      </main>
+      <StatusBar state={state} />
+    </div>
+  );
+};
+
+const styles = {
+  root: {
+    height: '100%',
+    minHeight: 0,
+    display: 'grid',
+    gridTemplateRows: '48px minmax(0, 1fr) 34px',
+    background: colors.bg,
+    color: colors.textHi,
+    fontFamily: font.sans,
+  },
+  toolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '6px 12px',
+    background: colors.surface1,
+    borderBottom: `1px solid ${colors.border}`,
+  },
+  filenameInput: {
+    width: 220,
+    height: 34,
+    background: colors.surface2,
+    color: colors.textHi,
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.sm,
+    padding: '0 10px',
+  },
+  primaryButton: {
+    height: 34,
+    minWidth: 94,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    background: colors.accent,
+    color: colors.textHi,
+    border: 'none',
+    borderRadius: radii.sm,
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  secondaryButton: {
+    height: 34,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    background: colors.surface2,
+    color: colors.textHi,
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.sm,
+    padding: '0 10px',
+    cursor: 'pointer',
+  },
+  select: {
+    height: 34,
+    background: colors.surface2,
+    color: colors.textHi,
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.sm,
+  },
+  smallSelect: {
+    background: colors.surface2,
+    color: colors.textMid,
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.sm,
+    fontSize: font.size.xs,
+  },
+  timeInput: {
+    height: 34,
+    background: colors.surface2,
+    color: colors.textHi,
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.sm,
+  },
+  runtimeChip: {
+    marginLeft: 'auto',
+    color: colors.info,
+    fontFamily: font.mono,
+    fontSize: font.size.sm,
+  },
+  main: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) auto',
+    minHeight: 0,
+  },
+  canvas: {
+    minWidth: 0,
+    minHeight: 0,
+    overflow: 'auto',
+    padding: 12,
+    position: 'relative',
+  },
+  plateGrid: {
+    display: 'grid',
+    gap: 12,
+    alignItems: 'start',
+    justifyContent: 'center',
+  },
+  plateSection: {
+    background: colors.surface1,
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.md,
+    padding: 8,
+    boxShadow: shadows.glow,
+  },
+  plateHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+    color: colors.textMid,
+    fontSize: font.size.sm,
+    fontWeight: 700,
+  },
+  emptyPlate: {
+    minHeight: 120,
+    background: colors.surface1,
+    color: colors.textLo,
+    border: `1px dashed ${colors.border}`,
+    borderRadius: radii.md,
+    cursor: 'pointer',
+  },
+  wellGrid: {
+    display: 'grid',
+    gap: 3,
+  },
+  axisLabel: {
+    height: 24,
+    display: 'grid',
+    placeItems: 'center',
+    color: colors.textLo,
+    fontFamily: font.mono,
+    fontSize: font.size.xs,
+  },
+  wellCell: {
+    aspectRatio: '1 / 1',
+    minWidth: 24,
+    border: 'none',
+    borderRadius: 4,
+    color: colors.textHi,
+    fontFamily: font.mono,
+    fontSize: font.size.xs,
+    cursor: 'pointer',
+    transition: `background ${motion.fast}, outline ${motion.fast}`,
+    overflow: 'hidden',
+  },
+  mouseUpCatcher: {
+    position: 'fixed',
+    inset: 0,
+    pointerEvents: 'none',
+  },
+  inspector: {
+    width: 300,
+    minHeight: 0,
+    overflow: 'auto',
+    background: colors.surface1,
+    borderLeft: `1px solid ${colors.border}`,
+    padding: 12,
+    position: 'relative',
+  },
+  inspectorTab: {
+    width: 38,
+    border: 'none',
+    borderLeft: `1px solid ${colors.border}`,
+    background: colors.surface1,
+    color: colors.textMid,
+    cursor: 'pointer',
+  },
+  collapseButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    border: `1px solid ${colors.border}`,
+    background: colors.surface2,
+    color: colors.textMid,
+    borderRadius: radii.sm,
+    cursor: 'pointer',
+  },
+  inspectorTitle: {
+    margin: '0 36px 12px 0',
+    fontSize: font.size.lg,
+  },
+  segmented: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, 1fr)',
+    gap: 6,
+    marginBottom: 12,
+  },
+  segment: {
+    height: 30,
+    border: `1px solid ${colors.border}`,
+    background: colors.surface2,
+    color: colors.textMid,
+    borderRadius: radii.sm,
+    cursor: 'pointer',
+  },
+  segmentActive: {
+    height: 30,
+    border: `1px solid ${colors.accent}`,
+    background: colors.accentDim,
+    color: colors.textHi,
+    borderRadius: radii.sm,
+    cursor: 'pointer',
+  },
+  field: {
+    display: 'grid',
+    gap: 5,
+    marginBottom: 10,
+    color: colors.textMid,
+    fontSize: font.size.sm,
+  },
+  numberWrap: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 48px',
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.sm,
+    overflow: 'hidden',
+  },
+  numberInput: {
+    minWidth: 0,
+    height: 34,
+    background: colors.surface2,
+    color: colors.textHi,
+    border: 'none',
+    padding: '0 8px',
+    fontFamily: font.mono,
+  },
+  unit: {
+    display: 'grid',
+    placeItems: 'center',
+    background: colors.bg,
+    color: colors.textLo,
+    fontFamily: font.mono,
+    fontSize: font.size.xs,
+  },
+  toggleRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    color: colors.textMid,
+    fontSize: font.size.sm,
+  },
+  statusBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: '0 12px',
+    background: colors.surface1,
+    borderTop: `1px solid ${colors.border}`,
+    color: colors.textMid,
+    fontSize: font.size.sm,
+  },
+};
+
+export default RoutineDesignerV2;
