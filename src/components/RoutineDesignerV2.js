@@ -289,15 +289,16 @@ const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, runnin
   );
 });
 
-const WellCell = memo(function WellCell({ row, col, well, selected, activeParam, maxValue, onPointerDown, onPointerEnter }) {
+const WellCell = memo(function WellCell({ row, col, well, selected, activeParam, maxValue, onPointerDown, onPointerEnter, onPointerUp }) {
   const value = Number(well[activeParam]) || 0;
   const alpha = maxValue > 0 ? Math.min(0.9, 0.12 + (value / maxValue) * 0.65) : 0;
   return (
     <button
       type="button"
       title={`${String.fromCharCode(65 + row)}${col + 1}: ${activeParam} ${value}`}
-      onMouseDown={() => onPointerDown(row, col)}
+      onMouseDown={(event) => onPointerDown(event, row, col)}
       onMouseEnter={() => onPointerEnter(row, col)}
+      onMouseUp={() => onPointerUp()}
       style={{
         ...styles.wellCell,
         background: value > 0 ? `rgba(14, 165, 233, ${alpha})` : colors.surface1,
@@ -312,6 +313,7 @@ const WellCell = memo(function WellCell({ row, col, well, selected, activeParam,
 const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef }) {
   const dragRef = useRef(null);
   const canvasRef = useRef(null);
+  const selectionAnchorRef = useRef(null);
   const activePlates = QUADRANTS.filter(quadrant => state.plates[quadrant]);
   const maxValue = useMemo(() => {
     let max = 0;
@@ -336,6 +338,35 @@ const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef })
     }
     dispatch({ type: 'SELECT', quadrant, cells });
   }, [dispatch, state.plates]);
+
+  const setSingleSelection = useCallback((event, quadrant, row, col) => {
+    const key = selectionKey(row, col);
+
+    if (event.shiftKey && selectionAnchorRef.current?.quadrant === quadrant) {
+      commitRange(quadrant, selectionAnchorRef.current.cell, { row, col });
+      return;
+    }
+
+    if (event.metaKey || event.ctrlKey) {
+      const nextCells = state.selection?.quadrant === quadrant
+        ? new Set(state.selection.cells)
+        : new Set();
+      if (nextCells.has(key)) {
+        nextCells.delete(key);
+      } else {
+        nextCells.add(key);
+      }
+      dispatch({ type: 'SELECT', quadrant, cells: nextCells });
+      selectionAnchorRef.current = { quadrant, cell: { row, col } };
+      return;
+    }
+
+    const isOnlySelected = state.selection?.quadrant === quadrant &&
+      state.selection.cells.size === 1 &&
+      state.selection.cells.has(key);
+    dispatch({ type: 'SELECT', quadrant, cells: isOnlySelected ? new Set() : new Set([key]) });
+    selectionAnchorRef.current = { quadrant, cell: { row, col } };
+  }, [commitRange, dispatch, state.selection]);
 
   const handleCopy = useCallback(() => {
     const selection = state.selection;
@@ -389,7 +420,14 @@ const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef })
   }, [handleCopy, handlePaste]);
 
   return (
-    <div ref={canvasRef} tabIndex={0} onKeyDown={handleKeyDown} style={styles.canvas}>
+    <div
+      ref={canvasRef}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      onMouseUp={() => { dragRef.current = null; }}
+      onMouseLeave={() => { dragRef.current = null; }}
+      style={styles.canvas}
+    >
       <div style={{
         ...styles.plateGrid,
         gridTemplateColumns: activePlates.length === 1 ? 'minmax(320px, 720px)' : 'repeat(2, minmax(260px, 1fr))',
@@ -438,14 +476,21 @@ const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef })
                         activeParam={state.activeParam}
                         maxValue={maxValue}
                         selected={state.selection?.quadrant === quadrant && state.selection.cells.has(selectionKey(row, col))}
-                        onPointerDown={(r, c) => {
-                          dragRef.current = { quadrant, start: { row: r, col: c } };
-                          commitRange(quadrant, { row: r, col: c }, { row: r, col: c });
+                        onPointerDown={(event, r, c) => {
+                          setSingleSelection(event, quadrant, r, c);
+                          dragRef.current = {
+                            quadrant,
+                            start: { row: r, col: c },
+                            dragEnabled: !event.shiftKey && !event.metaKey && !event.ctrlKey,
+                          };
                         }}
                         onPointerEnter={(r, c) => {
-                          if (dragRef.current?.quadrant === quadrant) {
+                          if (dragRef.current?.quadrant === quadrant && dragRef.current.dragEnabled) {
                             window.requestAnimationFrame(() => commitRange(quadrant, dragRef.current.start, { row: r, col: c }));
                           }
+                        }}
+                        onPointerUp={() => {
+                          dragRef.current = null;
                         }}
                       />
                     ))}
@@ -456,7 +501,6 @@ const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef })
           );
         })}
       </div>
-      <div onMouseUp={() => { dragRef.current = null; }} style={styles.mouseUpCatcher} />
     </div>
   );
 });

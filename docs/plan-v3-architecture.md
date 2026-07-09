@@ -1,5 +1,12 @@
 # Plan v3 (2026-07-09) — Hub/Agent Architecture
 
+> **AMENDED 2026-07-10** (see `docs/triage-2026-07-10.md`): the stack decision changes
+> from FastAPI to **Flask** on both hub and agent (app factory + blueprints, gunicorn in
+> Docker on the hub, plain Flask under systemd on the Pi). Read "FastAPI" below as
+> "Flask"; the topology, routes, and migration order are unchanged. WebSocket status
+> becomes polling (or flask-sock later); pydantic validation becomes plain helpers.
+> Camera streaming must use picamera2's `MJPEGEncoder` — **no cv2 dependency**.
+
 Amends `docs/plan-2026-07-09.md`. Decisions locked with Leon: **LAN PC/home server hosts
 the heavy services**, **FastAPI + Python**, **Docker Compose on the hub, systemd on the Pi**.
 Design only — no code written.

@@ -33,7 +33,7 @@ const CameraStream = ({ PI_BACKEND_URL }) => {
   };
 
   const handleImgError = () => {
-    setError(`Stream unavailable from ${STREAM_URL}. Check the Pi camera cable, picamera2, and opencv installation.`);
+    setError(`Stream unavailable from ${STREAM_URL}. Check the Pi camera cable and picamera2 installation.`);
     setStreaming(false);
   };
 

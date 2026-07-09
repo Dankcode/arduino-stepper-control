@@ -341,12 +341,16 @@ class SerialLink:
         try:
             self.conn.write(f"{command}\n".encode("ascii"))
             first = self._readline()
-            if not first:
+            if not first and not expect_done:
                 return False, "Serial timeout: no response."
             if first.startswith("ERR:"):
                 return False, first
             if expect_done:
-                if first.startswith("OK:done"):
+                # v1 firmware is silent while a blocking move runs, so an empty
+                # first read just means the move is still in progress.
+                # v2 firmware replies "OK:done x y z"; v1 replies "OK:move_complete".
+                # Accept both so the backend works with whichever firmware is flashed.
+                if first.startswith("OK:done") or first.startswith("OK:move_complete"):
                     return True, first
                 deadline = time.time() + max(30.0, SERIAL_TIMEOUT)
                 last = first
@@ -359,7 +363,7 @@ class SerialLink:
                         return False, line
                     if line.startswith("OK:aborted"):
                         return False, line
-                    if line.startswith("OK:done"):
+                    if line.startswith("OK:done") or line.startswith("OK:move_complete"):
                         return True, line
                 return False, f"Timed out waiting for move completion after {last!r}."
             if first.startswith("OK:") or first.startswith("POS ") or first:
@@ -870,6 +874,11 @@ def camera_take_picture():
     exposure_time = _coerce_int(data.get("exposure_time"), DEFAULT_EXPOSURE_TIME_US)
     if exposure_time <= 0:
         return jsonify({"success": False, "message": "Exposure time must be positive."}), 400
+    if _stream_active:
+        return jsonify({
+            "success": False,
+            "message": "Camera stream is running. Stop the stream before taking a still picture.",
+        }), 409
     result = subprocess.run(
         [sys.executable, str(CAMERA_SCRIPT_PATH), "--mode", "manual", "--exposure", str(exposure_time)],
         capture_output=True,
@@ -889,21 +898,17 @@ def camera_status():
         from picamera2 import Picamera2  # noqa: F401
     except ImportError as exc:
         missing.append(f"picamera2: {exc}")
-    try:
-        import cv2  # noqa: F401
-    except ImportError as exc:
-        missing.append(f"opencv/cv2: {exc}")
 
     if missing:
         return jsonify({
             "available": False,
-            "message": "Camera stream dependencies are unavailable on this backend.",
+            "message": "Camera stream dependency is unavailable on this backend.",
             "details": missing,
         }), 503
 
     return jsonify({
         "available": True,
-        "message": "Camera stream dependencies are available.",
+        "message": "Camera stream dependency is available.",
     })
 
 
@@ -912,9 +917,21 @@ def camera_stream():
     global _stream_active
     try:
         from picamera2 import Picamera2
-        import cv2
+        from picamera2.encoders import MJPEGEncoder
+        from picamera2.outputs import FileOutput
     except ImportError as exc:
-        return jsonify({"error": f"Missing camera stream library: {exc}"}), 500
+        return jsonify({"error": f"Missing picamera2 stream library: {exc}"}), 500
+
+    class StreamingOutput(io.BufferedIOBase):
+        def __init__(self):
+            self.frame = None
+            self.condition = threading.Condition()
+
+        def write(self, buf):
+            with self.condition:
+                self.frame = bytes(buf)
+                self.condition.notify_all()
+            return len(buf)
 
     def frames():
         global _stream_active
@@ -922,24 +939,25 @@ def camera_stream():
             return
         _stream_active = True
         picam2 = None
+        output = StreamingOutput()
         try:
             picam2 = Picamera2()
-            config = picam2.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
+            config = picam2.create_video_configuration(main={"size": (1280, 720)})
             picam2.configure(config)
-            picam2.start()
-            time.sleep(0.5)
+            picam2.start_recording(MJPEGEncoder(), FileOutput(output))
             while True:
-                frame = picam2.capture_array()
-                ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                if ok:
-                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
+                with output.condition:
+                    output.condition.wait(timeout=5)
+                    frame = output.frame
+                if frame:
+                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
         except GeneratorExit:
             pass
         finally:
             _stream_active = False
             if picam2 is not None:
                 try:
-                    picam2.stop()
+                    picam2.stop_recording()
                     picam2.close()
                 except Exception:
                     pass

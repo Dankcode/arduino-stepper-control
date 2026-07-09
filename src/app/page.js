@@ -23,6 +23,8 @@ export default function Home() {
   const PI_BACKEND_URL = useMemo(() => DEFAULT_PI_BACKEND_URL.replace(/\/$/, ''), []);
   const routineProgress = useRoutineProgress(PI_BACKEND_URL);
   const toast = useToast();
+  // V2 is the default now that it supports click/toggle/range selection.
+  // Keep the legacy builder available via ?legacy=1 during the parity window.
   const useLegacyRoutineBuilder = typeof window !== 'undefined'
     ? new URLSearchParams(window.location.search).get('legacy') === '1'
     : false;
