@@ -58,6 +58,9 @@ CORS(app)
 serial_lock = threading.Lock()
 routine_progress = {"running": False, "wells_done": 0, "wells_total": 0, "current_well": None}
 _stream_active = False
+_still_capture_active = False
+_camera_lock = threading.Lock()
+_last_camera_error = None
 
 
 # --------------------------------------------------------------------------
@@ -266,6 +269,7 @@ class SerialLink:
         self.baud = baud
         self.conn = None
         self.current_steps = 400
+        self._write_lock = threading.Lock()
 
     @property
     def connected(self):
@@ -327,7 +331,8 @@ class SerialLink:
 
     def disconnect(self):
         if self.conn is not None:
-            self.conn.close()
+            with self._write_lock:
+                self.conn.close()
         self.conn = None
 
     def _readline(self):
@@ -339,7 +344,8 @@ class SerialLink:
         if not self.connected:
             return False, "Arduino is not connected."
         try:
-            self.conn.write(f"{command}\n".encode("ascii"))
+            with self._write_lock:
+                self.conn.write(f"{command}\n".encode("ascii"))
             first = self._readline()
             if not first and not expect_done:
                 return False, "Serial timeout: no response."
@@ -377,7 +383,10 @@ class SerialLink:
         if not self.connected:
             return False, "Arduino is not connected."
         try:
-            self.conn.write(b"!\n")
+            # Do not wait for the routine command's completion reply here. The
+            # v2 firmware emits it to the command reader after flushing the move.
+            with self._write_lock:
+                self.conn.write(b"!\n")
             return True, "Abort sent."
         except Exception as exc:
             self.disconnect()
@@ -421,6 +430,7 @@ class RoutineRunner:
             routine_progress.update({
                 "running": True,
                 "aborted": False,
+                "abort_requested": False,
                 "error": None,
                 "done": False,
                 "filename": filename,
@@ -434,12 +444,15 @@ class RoutineRunner:
 
     def abort(self):
         self.abort_event.set()
-        ok, reply = serial_link.abort()
         routine_progress.update({
-            "running": False,
-            "aborted": True,
-            "error": None if ok else reply,
+            "abort_requested": True,
+            "error": None,
         })
+        if not serial_link.connected:
+            return True, "Routine stop requested before the Arduino connected."
+        ok, reply = serial_link.abort()
+        if not ok:
+            routine_progress.update({"error": reply})
         return ok, reply
 
     def _load_wells(self, filename, plate):
@@ -478,6 +491,7 @@ class RoutineRunner:
                 "wells_done": 0,
                 "current_well": None,
                 "running": True,
+                "abort_requested": False,
             })
 
             if not serial_link.connected:
@@ -494,6 +508,7 @@ class RoutineRunner:
                 if self.abort_event.is_set():
                     raise InterruptedError("Routine aborted.")
 
+                routine_progress.update({"current_well": segment.well_id})
                 ok, reply = serial_link.command(
                     f"M {segment.dx_steps} {segment.dy_steps} {segment.dz_steps}",
                     expect_done=True,
@@ -514,6 +529,7 @@ class RoutineRunner:
                 "running": False,
                 "done": True,
                 "aborted": False,
+                "abort_requested": False,
                 "error": None,
                 "current_well": None,
             })
@@ -524,7 +540,9 @@ class RoutineRunner:
                 "running": False,
                 "aborted": True,
                 "done": False,
+                "abort_requested": False,
                 "error": str(exc),
+                "current_well": None,
             })
         except Exception as exc:
             serial_link.abort()
@@ -533,8 +551,29 @@ class RoutineRunner:
                 "running": False,
                 "aborted": False,
                 "done": False,
+                "abort_requested": False,
                 "error": str(exc),
             })
+
+    @staticmethod
+    def _run_hardware_process(command, *, timeout, label):
+        """Run a Pi hardware helper and make its failure visible to the runner."""
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+                cwd=BASE_DIR,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"{label} timed out after {timeout:.1f}s.") from exc
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "no diagnostic output").strip()
+            raise RuntimeError(f"{label} failed: {detail}")
+        return result
 
     def _capture(self, filename, segment):
         if segment.delay_ms > 0:
@@ -542,19 +581,16 @@ class RoutineRunner:
 
         if segment.light_ms > 0:
             duration_s = segment.light_ms / 1000.0
-            subprocess.run(
+            self._run_hardware_process(
                 [sys.executable, str(LIGHT_SCRIPT_PATH), "automate", str(duration_s)],
-                capture_output=True,
-                text=True,
-                check=False,
                 timeout=duration_s + 5,
-                cwd=BASE_DIR,
+                label=f"Blue-light pulse for {segment.well_id}",
             )
 
         if segment.exposure_us > 0:
             date_today = datetime.now().strftime("%Y-%m-%d")
             output_path = PICTURES_DIR / filename / date_today / f"{segment.well_id}.jpg"
-            subprocess.run(
+            self._run_hardware_process(
                 [
                     sys.executable,
                     str(CAMERA_SCRIPT_PATH),
@@ -565,11 +601,8 @@ class RoutineRunner:
                     "--output-path",
                     str(output_path),
                 ],
-                capture_output=True,
-                text=True,
-                check=False,
                 timeout=30,
-                cwd=BASE_DIR,
+                label=f"Camera capture for {segment.well_id}",
             )
 
 
@@ -579,9 +612,14 @@ routine_runner = RoutineRunner()
 # --------------------------------------------------------------------------
 # Health
 # --------------------------------------------------------------------------
+# Bump when routes change so a stale Pi deploy is obvious from the browser:
+# open <backend-url>/ and compare against this file.
+BACKEND_VERSION = "2026-07-10.2"
+
+
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "message": "Backend is running."})
+    return jsonify({"status": "ok", "message": "Backend is running.", "version": BACKEND_VERSION})
 
 
 # --------------------------------------------------------------------------
@@ -598,7 +636,10 @@ def save_routine_sql():
     conn = get_db()
     try:
         conn.execute("BEGIN")
-        conn.execute("INSERT OR REPLACE INTO routines (filename) VALUES (?)", (filename,))
+        # Keep activation and schedule rows intact when an existing routine is
+        # edited. SQLite REPLACE deletes the parent row first and cascades those
+        # children away, which made a saved active routine silently inactive.
+        conn.execute("INSERT OR IGNORE INTO routines (filename) VALUES (?)", (filename,))
         conn.execute("DELETE FROM well_data WHERE filename = ?", (filename,))
         for item in wells:
             conn.execute("""
@@ -675,6 +716,47 @@ def routines_all():
             "active_routines": active_routines,
             "routines": [row["filename"] for row in all_rows],
             "active": sorted(active_names),
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/routines/detail", methods=["GET"])
+def routines_detail():
+    """Full well data + schedule for one routine, shaped so the designer can
+    hydrate it directly (same shape as the /save_routine_sql payload)."""
+    filename = _clean_filename(request.args.get("filename", ""))
+    if not filename:
+        return jsonify({"error": "filename query parameter is required."}), 400
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM routines WHERE filename = ?", (filename,)
+        ).fetchone()
+        if not exists:
+            return jsonify({"error": f"Routine '{filename}' was not found."}), 404
+        rows = conn.execute("""
+            SELECT plateNumber, wellId, stepAmount, delayBetweenStep,
+                   lightTime, exposureTime, switchPlate, layout
+            FROM well_data
+            WHERE filename = ?
+            ORDER BY plateNumber, wellId
+        """, (filename,)).fetchall()
+        schedule = conn.execute("""
+            SELECT start_time, repeat_interval, repeat_count
+            FROM routine_schedule
+            WHERE filename = ?
+            ORDER BY schedule_day, start_time
+            LIMIT 1
+        """, (filename,)).fetchone()
+        return jsonify({
+            "filename": filename,
+            "well_data": [dict(row) for row in rows],
+            "schedule": {
+                "startTime": schedule["start_time"],
+                "repeatInterval": schedule["repeat_interval"] or "daily",
+                "repeatCount": schedule["repeat_count"] or 1,
+            } if schedule else None,
         })
     finally:
         conn.close()
@@ -816,6 +898,8 @@ def api_status():
 
 @app.route("/api/connect", methods=["POST"])
 def api_connect():
+    if routine_runner.running:
+        return jsonify({"success": False, "message": "Routine is running; connection changes are blocked."}), 409
     with serial_lock:
         try:
             ok, message = serial_link.connect()
@@ -826,6 +910,8 @@ def api_connect():
 
 @app.route("/api/disconnect", methods=["POST"])
 def api_disconnect():
+    if routine_runner.running:
+        return jsonify({"success": False, "message": "Routine is running; disconnect is blocked."}), 409
     with serial_lock:
         serial_link.disconnect()
     return jsonify({"success": True, "message": "Disconnected from Arduino.", "connected": False})
@@ -868,99 +954,164 @@ def api_motor(action):
 # --------------------------------------------------------------------------
 # Camera + blue light
 # --------------------------------------------------------------------------
-@app.route("/api/camera/take-picture", methods=["POST"])
-def camera_take_picture():
-    data = request.get_json() or {}
-    exposure_time = _coerce_int(data.get("exposure_time"), DEFAULT_EXPOSURE_TIME_US)
-    if exposure_time <= 0:
-        return jsonify({"success": False, "message": "Exposure time must be positive."}), 400
-    if _stream_active:
-        return jsonify({
-            "success": False,
-            "message": "Camera stream is running. Stop the stream before taking a still picture.",
-        }), 409
-    result = subprocess.run(
-        [sys.executable, str(CAMERA_SCRIPT_PATH), "--mode", "manual", "--exposure", str(exposure_time)],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=BASE_DIR,
-    )
-    if result.returncode == 0:
-        return jsonify({"success": True, "message": "Picture capture complete.", "output": result.stdout})
-    return jsonify({"success": False, "message": result.stderr.strip() or "Camera script failed.", "output": result.stderr}), 500
-
-
-@app.route("/api/camera/status", methods=["GET"])
-def camera_status():
-    missing = []
-    try:
-        from picamera2 import Picamera2  # noqa: F401
-    except ImportError as exc:
-        missing.append(f"picamera2: {exc}")
-
-    if missing:
-        return jsonify({
-            "available": False,
-            "message": "Camera stream dependency is unavailable on this backend.",
-            "details": missing,
-        }), 503
-
-    return jsonify({
-        "available": True,
-        "message": "Camera stream dependency is available.",
-    })
-
-
-@app.route("/api/camera/stream", methods=["GET"])
-def camera_stream():
-    global _stream_active
+def _camera_components():
+    """Return the exact picamera2 pieces used by the stream, or diagnostics."""
     try:
         from picamera2 import Picamera2
         from picamera2.encoders import MJPEGEncoder
         from picamera2.outputs import FileOutput
     except ImportError as exc:
-        return jsonify({"error": f"Missing picamera2 stream library: {exc}"}), 500
+        return None, [
+            f"picamera2: {exc}",
+            "Install python3-picamera2 and create the agent venv with --system-site-packages.",
+        ]
+    return (Picamera2, MJPEGEncoder, FileOutput), []
 
-    class StreamingOutput(io.BufferedIOBase):
-        def __init__(self):
-            self.frame = None
-            self.condition = threading.Condition()
 
-        def write(self, buf):
-            with self.condition:
-                self.frame = bytes(buf)
-                self.condition.notify_all()
-            return len(buf)
+def _camera_readiness():
+    components, details = _camera_components()
+    with _camera_lock:
+        streaming = _stream_active
+        capturing = _still_capture_active
+        last_error = _last_camera_error
+    if components is None:
+        return False, "Camera stream dependency is unavailable on this backend.", details, streaming, capturing, last_error
+    if streaming:
+        return True, "Camera stream is active.", [], streaming, capturing, last_error
+    if capturing:
+        return False, "A still capture is using the camera.", [], streaming, capturing, last_error
 
-    def frames():
-        global _stream_active
+    Picamera2, _MJPEGEncoder, _FileOutput = components
+    try:
+        cameras = Picamera2.global_camera_info()
+    except Exception as exc:
+        return False, "Could not query the Pi camera.", [str(exc)], streaming, capturing, last_error
+    if not cameras:
+        return False, "No Pi camera was detected.", ["Check the CSI cable and enable the camera interface."], streaming, capturing, last_error
+    return True, "Pi camera is ready.", [], streaming, capturing, last_error
+
+
+class StreamingOutput(io.BufferedIOBase):
+    """Keeps the latest MJPEG frame available for the multipart response."""
+
+    def __init__(self):
+        self.frame = None
+        self.condition = threading.Condition()
+
+    def write(self, buf):
+        with self.condition:
+            self.frame = bytes(buf)
+            self.condition.notify_all()
+        return len(buf)
+
+
+@app.route("/api/camera/take-picture", methods=["POST"])
+def camera_take_picture():
+    global _last_camera_error, _still_capture_active
+    data = request.get_json() or {}
+    exposure_time = _coerce_int(data.get("exposure_time"), DEFAULT_EXPOSURE_TIME_US)
+    if exposure_time <= 0:
+        return jsonify({"success": False, "message": "Exposure time must be positive."}), 400
+    with _camera_lock:
         if _stream_active:
-            return
-        _stream_active = True
+            return jsonify({
+                "success": False,
+                "message": "Camera stream is running. Stop the stream before taking a still picture.",
+            }), 409
+        if _still_capture_active:
+            return jsonify({"success": False, "message": "A still capture is already in progress."}), 409
+        _still_capture_active = True
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(CAMERA_SCRIPT_PATH), "--mode", "manual", "--exposure", str(exposure_time)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            cwd=BASE_DIR,
+        )
+    except subprocess.TimeoutExpired:
+        _last_camera_error = "Manual picture capture timed out after 30 seconds."
+        return jsonify({"success": False, "message": _last_camera_error}), 504
+    finally:
+        with _camera_lock:
+            _still_capture_active = False
+
+    if result.returncode == 0:
+        _last_camera_error = None
+        return jsonify({"success": True, "message": "Picture capture complete.", "output": result.stdout})
+    _last_camera_error = result.stderr.strip() or result.stdout.strip() or "Camera script failed."
+    return jsonify({"success": False, "message": _last_camera_error, "output": result.stderr}), 500
+
+
+@app.route("/api/camera/status", methods=["GET"])
+def camera_status():
+    available, message, details, streaming, capturing, last_error = _camera_readiness()
+    return jsonify({
+        "available": available,
+        "message": message,
+        "details": details,
+        "streaming": streaming,
+        "capturing": capturing,
+        "last_error": last_error,
+    }), 200 if available else 503
+
+
+@app.route("/api/camera/stream", methods=["GET"])
+def camera_stream():
+    global _last_camera_error, _stream_active
+    components, details = _camera_components()
+    if components is None:
+        return jsonify({"error": "Camera stream dependency is unavailable.", "details": details}), 503
+    Picamera2, MJPEGEncoder, FileOutput = components
+
+    with _camera_lock:
+        if _stream_active:
+            return jsonify({"error": "A camera stream is already active."}), 409
+        if _still_capture_active:
+            return jsonify({"error": "A still capture is using the camera."}), 409
         picam2 = None
-        output = StreamingOutput()
         try:
             picam2 = Picamera2()
             config = picam2.create_video_configuration(main={"size": (1280, 720)})
             picam2.configure(config)
+            output = StreamingOutput()
             picam2.start_recording(MJPEGEncoder(), FileOutput(output))
-            while True:
-                with output.condition:
-                    output.condition.wait(timeout=5)
-                    frame = output.frame
-                if frame:
-                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-        except GeneratorExit:
-            pass
-        finally:
-            _stream_active = False
+            _stream_active = True
+            _last_camera_error = None
+        except Exception as exc:
+            _last_camera_error = f"Could not start the Pi camera stream: {exc}"
             if picam2 is not None:
                 try:
-                    picam2.stop_recording()
                     picam2.close()
                 except Exception:
                     pass
+            return jsonify({"error": _last_camera_error}), 503
+
+    def frames():
+        global _last_camera_error, _stream_active
+        try:
+            while True:
+                with output.condition:
+                    output.condition.wait_for(lambda: output.frame is not None, timeout=5)
+                    frame = output.frame
+                if frame is None:
+                    raise RuntimeError("No frames received from the Pi camera within 5 seconds.")
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        except GeneratorExit:
+            pass
+        except Exception as exc:
+            _last_camera_error = str(exc)
+            app.logger.warning("Camera stream ended: %s", exc)
+        finally:
+            with _camera_lock:
+                _stream_active = False
+            try:
+                picam2.stop_recording()
+                picam2.close()
+            except Exception:
+                pass
 
     return Response(frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -1061,7 +1212,7 @@ def routine_abort():
         routine_progress.update({"running": False, "aborted": False})
         return jsonify({"aborted": False, "message": "No routine is running."})
     ok, message = routine_runner.abort()
-    return jsonify({"aborted": ok, "message": message}), 200 if ok else 503
+    return jsonify({"abort_requested": ok, "message": message}), 202 if ok else 503
 
 
 @app.route("/api/motion/estimate", methods=["POST"])

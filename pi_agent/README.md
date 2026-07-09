@@ -5,7 +5,8 @@ The Pi agent is the Python backend in `src/app/RaspiBackend`. This folder contai
 ## Install
 
 ```bash
-python3 -m venv ~/stepper-agent-venv
+sudo apt install -y python3-picamera2 python3-rpi.gpio
+python3 -m venv --system-site-packages ~/stepper-agent-venv --clear
 ~/stepper-agent-venv/bin/pip install -r pi_agent/requirements.txt
 ```
 
@@ -13,9 +14,15 @@ Copy `.env.example` to a Pi-local environment file and set:
 
 ```bash
 STEPPER_PI_HOME=/home/dank
-STEPPER_SERIAL_PORT=/dev/ttyUSB0
+# Optional: leave unset to auto-detect /dev/ttyUSB* and /dev/ttyACM*.
+# A stable /dev/serial/by-id/... path is preferred when available.
+STEPPER_SERIAL_PORT=/dev/serial/by-id/<your-controller>
 STEPPER_BLUE_LIGHT_PIN=21
 ```
+
+`picamera2` comes from Raspberry Pi OS apt packages, so `--system-site-packages`
+is required for the agent venv. The MJPEG stream uses picamera2 directly; do not
+install OpenCV for it.
 
 ## Run Manually
 

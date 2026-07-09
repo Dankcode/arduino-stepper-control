@@ -18,7 +18,7 @@ const ConnectionBadge = ({ status, url, routineRunning, checkedAt }) => {
   const label = routineRunning ? 'Routine running' : status;
 
   return (
-    <div style={{
+    <div className="connection-badge" style={{
       display: 'inline-flex',
       alignItems: 'center',
       gap: 8,
@@ -38,9 +38,9 @@ const ConnectionBadge = ({ status, url, routineRunning, checkedAt }) => {
         background: color,
         boxShadow: normalized === 'connected' || normalized === 'running' ? `0 0 8px ${color}` : 'none',
       }} />
-      <span>{label}</span>
-      {url ? <span style={{ color: colors.textLo, fontFamily: font.mono }}>{url}</span> : null}
-      {checkedAt ? <span style={{ color: colors.textLo, fontFamily: font.mono }}>{checkedAt}</span> : null}
+      <span className="connection-badge-label">{label}</span>
+      {url ? <span className="connection-badge-url" style={{ color: colors.textLo, fontFamily: font.mono }}>{url}</span> : null}
+      {checkedAt ? <span className="connection-badge-checked" style={{ color: colors.textLo, fontFamily: font.mono }}>{checkedAt}</span> : null}
     </div>
   );
 };

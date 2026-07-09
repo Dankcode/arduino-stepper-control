@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
 
 const WEEKDAYS = [
   { value: 1, label: 'Monday' },
@@ -19,9 +18,9 @@ const WEEKDAYS = [
  * @param {object} props The component props.
  * @param {string} props.PI_BACKEND_URL The URL of the Raspberry Pi backend.
  * @param {string} props.connectionStatus The current connection status.
+ * @param {function} props.onEditRoutine Called with a routine base name to open it in the designer.
  */
-const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
-  const router = useRouter();
+const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus, onEditRoutine }) => {
 
   // State for routine data and UI elements
   const [allRoutines, setAllRoutines] = useState([]);
@@ -462,7 +461,11 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus }) => {
 
   const handleEditRoutine = (filename) => {
     const routineBaseName = filename.replace('.sql', '');
-    router.push(`/routine-creator?edit=${routineBaseName}`);
+    if (typeof onEditRoutine === 'function') {
+      onEditRoutine(routineBaseName);
+    } else {
+      console.warn('onEditRoutine prop is missing; cannot open the designer.');
+    }
   };
 
   const moveToActive = async (filename) => {

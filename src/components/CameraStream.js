@@ -1,41 +1,57 @@
 'use client';
-import React, { useState, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 const CameraStream = ({ PI_BACKEND_URL }) => {
   const [streaming, setStreaming] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState('');
   const imgRef = useRef(null);
 
   const STREAM_URL = `${PI_BACKEND_URL}/api/camera/stream`;
 
-  const startStream = async () => {
+  const startStream = useCallback(async () => {
     setError('');
+    setConnecting(true);
     try {
       const response = await fetch(`${PI_BACKEND_URL}/api/camera/status`, { cache: 'no-store' });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.available === false) {
-        const details = Array.isArray(data.details) && data.details.length
-          ? ` ${data.details.join(' | ')}`
-          : '';
-        throw new Error(`${data.message || 'Camera stream is unavailable.'}${details}`);
+        const details = [
+          ...(Array.isArray(data.details) ? data.details : []),
+          data.last_error,
+        ].filter(Boolean);
+        const detailText = details.length ? ` ${details.join(' | ')}` : '';
+        throw new Error(`${data.message || 'Camera stream is unavailable.'}${detailText}`);
       }
       setStreaming(true);
     } catch (err) {
       setError(err.message || 'Stream unavailable - check that the Pi backend is running and the camera is connected.');
       setStreaming(false);
+      setConnecting(false);
     }
-  };
+  }, [PI_BACKEND_URL]);
 
-  const stopStream = () => {
+  const stopStream = useCallback(() => {
     // Clearing the src stops the browser from keeping the MJPEG connection open
     if (imgRef.current) imgRef.current.src = '';
     setStreaming(false);
-  };
+    setConnecting(false);
+  }, []);
 
-  const handleImgError = () => {
+  const handleImgLoad = useCallback(() => {
+    setConnecting(false);
+    setError('');
+  }, []);
+
+  const handleImgError = useCallback(() => {
     setError(`Stream unavailable from ${STREAM_URL}. Check the Pi camera cable and picamera2 installation.`);
     setStreaming(false);
-  };
+    setConnecting(false);
+  }, [STREAM_URL]);
+
+  useEffect(() => () => {
+    if (imgRef.current) imgRef.current.src = '';
+  }, []);
 
   return (
     <div className="cs-container">
@@ -197,6 +213,7 @@ const CameraStream = ({ PI_BACKEND_URL }) => {
               src={STREAM_URL}
               alt="Live camera stream"
               className="cs-stream-img"
+              onLoad={handleImgLoad}
               onError={handleImgError}
             />
           ) : (
@@ -210,14 +227,14 @@ const CameraStream = ({ PI_BACKEND_URL }) => {
         {/* Status indicator */}
         <div className="cs-status">
           <div className="cs-status-dot" />
-          {streaming ? 'Streaming live from Pi camera' : 'Stream stopped'}
+          {streaming ? (connecting ? 'Connecting to Pi camera...' : 'Streaming live from Pi camera') : 'Stream stopped'}
         </div>
 
         {/* Controls */}
         <div className="cs-controls">
           {!streaming ? (
-            <button className="cs-btn cs-btn-start" onClick={startStream}>
-              ▶ Start Stream
+            <button className="cs-btn cs-btn-start" onClick={startStream} disabled={connecting}>
+              {connecting ? 'Connecting...' : '▶ Start Stream'}
             </button>
           ) : (
             <button className="cs-btn cs-btn-stop" onClick={stopStream}>

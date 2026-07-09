@@ -37,9 +37,14 @@ npm run build
 Install dependencies on the Pi:
 
 ```bash
-python3 -m venv ~/stepper-agent-venv
+sudo apt install -y python3-picamera2 python3-rpi.gpio
+python3 -m venv --system-site-packages ~/stepper-agent-venv --clear
 ~/stepper-agent-venv/bin/pip install -r pi_agent/requirements.txt
 ```
+
+`picamera2` is installed by Raspberry Pi OS through apt. The agent venv must use
+`--system-site-packages` so the Flask process can import it; OpenCV is not needed
+for the MJPEG stream.
 
 Deploy over LAN:
 
@@ -56,7 +61,7 @@ python3 backend
 
 ## Firmware
 
-Open `firmware/stepper_controller/stepper_controller.ino` in the Arduino IDE or CLI and upload it to the controller board.
+Open `firmware/stepper_controller_v2/stepper_controller_v2.ino` in the Arduino IDE or CLI and upload it to the controller board. The V2 protocol is required for streamed routine moves and mid-move Abort; the legacy V1 sketch remains in the tree for manual-control compatibility during migration.
 
 The serial protocol is documented in `firmware/README.md`.
 

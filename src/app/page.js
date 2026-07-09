@@ -23,6 +23,13 @@ export default function Home() {
   const PI_BACKEND_URL = useMemo(() => DEFAULT_PI_BACKEND_URL.replace(/\/$/, ''), []);
   const routineProgress = useRoutineProgress(PI_BACKEND_URL);
   const toast = useToast();
+  // Set when the user clicks Edit in Pi Routines; consumed by RoutineDesignerV2.
+  // ts forces the effect to re-run when the same routine is edited twice.
+  const [editRequest, setEditRequest] = useState(null);
+  const handleEditRoutine = useCallback((name) => {
+    setEditRequest({ name, ts: Date.now() });
+    setActiveTab('routine');
+  }, []);
   // V2 is the default now that it supports click/toggle/range selection.
   // Keep the legacy builder available via ?legacy=1 during the parity window.
   const useLegacyRoutineBuilder = typeof window !== 'undefined'
@@ -212,6 +219,38 @@ export default function Home() {
           background-color: #e5e7eb;
           color: #4b5563;
         }
+
+        @media (max-width: 700px) {
+          .top-status-box {
+            position: static;
+            align-self: stretch;
+            justify-content: flex-end;
+            padding: 0.35rem 0.5rem;
+            background-color: #0f172a;
+            border-bottom: 1px solid #1e293b;
+          }
+          .connection-badge-url,
+          .connection-badge-checked {
+            display: none;
+          }
+          .global-progress {
+            position: static;
+            margin: 0 0.5rem;
+          }
+          .tab-section {
+            padding: 0;
+            min-height: 2.75rem;
+            overflow-x: auto;
+          }
+          .tab-nav {
+            gap: 0;
+            min-width: max-content;
+          }
+          .tab-button {
+            padding: 0.75rem;
+            font-size: 0.65rem;
+          }
+        }
       `}</style>
 
       <div className="top-status-box">
@@ -273,13 +312,14 @@ export default function Home() {
         {activeTab === 'routine' && (
           useLegacyRoutineBuilder
             ? <RoutineBuilder PI_BACKEND_URL={PI_BACKEND_URL} />
-            : <RoutineDesignerV2 PI_BACKEND_URL={PI_BACKEND_URL} />
+            : <RoutineDesignerV2 PI_BACKEND_URL={PI_BACKEND_URL} editRequest={editRequest} />
         )}
         {activeTab === 'manual' && <StepperMotorControl PI_BACKEND_URL={PI_BACKEND_URL} />}
         {activeTab === 'pi' && (
           <PiRoutineManager
             connectionStatus={connectionStatus}
             PI_BACKEND_URL={PI_BACKEND_URL}
+            onEditRoutine={handleEditRoutine}
           />
         )}
         {activeTab === 'pictures' && (

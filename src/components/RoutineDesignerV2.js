@@ -118,6 +118,7 @@ function reducer(state, action) {
         ...state,
         plates: action.plates,
         filename: action.filename || state.filename,
+        schedule: { ...initialState.schedule, ...(action.schedule || {}) },
         saveState: 'idle',
         selection: null,
       };
@@ -248,8 +249,9 @@ const formatSeconds = (value) => {
 
 const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, running, onSave, onRun, onImport }) {
   return (
-    <div style={styles.toolbar}>
+    <div className="routine-designer-toolbar" style={styles.toolbar}>
       <input
+        className="routine-designer-filename"
         value={state.filename}
         onChange={(event) => dispatch({ type: 'SET_FILENAME', filename: event.target.value })}
         placeholder="routine-name"
@@ -282,7 +284,7 @@ const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, runnin
         onChange={(event) => dispatch({ type: 'SET_SCHEDULE', schedule: { startTime: event.target.value } })}
         style={styles.timeInput}
       />
-      <div style={styles.runtimeChip}>
+      <div className="routine-designer-runtime" style={styles.runtimeChip}>
         {runtime.loading ? 'Estimating...' : `Runtime ${formatSeconds(runtime.seconds)}`}
       </div>
     </div>
@@ -421,6 +423,7 @@ const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef })
 
   return (
     <div
+      className="routine-designer-canvas"
       ref={canvasRef}
       tabIndex={0}
       onKeyDown={handleKeyDown}
@@ -428,7 +431,7 @@ const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef })
       onMouseLeave={() => { dragRef.current = null; }}
       style={styles.canvas}
     >
-      <div style={{
+      <div className="routine-designer-plate-grid" style={{
         ...styles.plateGrid,
         gridTemplateColumns: activePlates.length === 1 ? 'minmax(320px, 720px)' : 'repeat(2, minmax(260px, 1fr))',
       }}>
@@ -448,7 +451,7 @@ const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef })
           }
           const { rows, cols } = getLayoutDimensions(plate.layout);
           return (
-            <section key={quadrant} style={styles.plateSection}>
+            <section key={quadrant} className="routine-designer-plate-section" style={styles.plateSection}>
               <div style={styles.plateHeader}>
                 <span>{QUADRANT_LABELS[quadrant]}</span>
                 <select
@@ -461,7 +464,7 @@ const PlateCanvas = memo(function PlateCanvas({ state, dispatch, clipboardRef })
                   <option value="96-well">96-well</option>
                 </select>
               </div>
-              <div style={{ ...styles.wellGrid, gridTemplateColumns: `24px repeat(${cols}, minmax(24px, 1fr))` }}>
+              <div className="routine-designer-well-grid" style={{ ...styles.wellGrid, gridTemplateColumns: `24px repeat(${cols}, minmax(24px, 1fr))` }}>
                 <div />
                 {Array.from({ length: cols }, (_, col) => <div key={col} style={styles.axisLabel}>{col + 1}</div>)}
                 {Array.from({ length: rows }, (_, row) => (
@@ -518,7 +521,7 @@ const Inspector = memo(function Inspector({ state, values, dispatch }) {
   const selectionLabel = count > 0 ? `${count} well${count === 1 ? '' : 's'} selected` : 'No wells selected';
 
   return (
-    <aside style={styles.inspector}>
+    <aside className="routine-designer-inspector" style={styles.inspector}>
       <button type="button" onClick={() => dispatch({ type: 'TOGGLE_INSPECTOR' })} style={styles.collapseButton}>
         <ChevronRight size={16} />
       </button>
@@ -583,7 +586,7 @@ const StatusBar = memo(function StatusBar({ state }) {
   );
 });
 
-const RoutineDesignerV2 = ({ PI_BACKEND_URL }) => {
+const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
@@ -591,6 +594,33 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL }) => {
   const toast = useToast();
   const runtime = useRuntimeEstimate(PI_BACKEND_URL, state.plates);
   const values = useSelectionValues(state.plates, state.selection);
+
+  // Load a saved routine for editing when Pi Routines' Edit button is clicked.
+  // editRequest.ts changes on every click so re-editing the same routine works.
+  useEffect(() => {
+    if (!editRequest?.name) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(
+          `${PI_BACKEND_URL}/routines/detail?filename=${encodeURIComponent(editRequest.name)}`,
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Failed to load routine.');
+        if (cancelled) return;
+        dispatch({
+          type: 'IMPORT_JSON',
+          plates: hydrateImport(data),
+          filename: sanitizeFilename(data.filename),
+          schedule: data.schedule,
+        });
+        toast.success(`Loaded '${data.filename}' for editing.`);
+      } catch (error) {
+        if (!cancelled) toast.error(error.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [PI_BACKEND_URL, editRequest?.name, editRequest?.ts, toast]);
 
   const handleSave = useCallback(async () => {
     if (!state.filename) {
@@ -634,6 +664,7 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL }) => {
           type: 'IMPORT_JSON',
           plates: hydrateImport(payload),
           filename: sanitizeFilename(payload.filename || file.name.replace(/\.json$/i, '')),
+          schedule: payload.schedule,
         });
         toast.success('Routine imported.');
       } catch (error) {
@@ -682,7 +713,8 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL }) => {
   }, [PI_BACKEND_URL, state.filename, state.plates, state.schedule, toast]);
 
   return (
-    <div style={styles.root}>
+    <>
+    <div className="routine-designer-v2" style={styles.root}>
       <Toolbar
         state={state}
         dispatch={dispatch}
@@ -693,12 +725,61 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL }) => {
         onRun={handleRun}
         onImport={handleImport}
       />
-      <main style={styles.main}>
+      <main className="routine-designer-main" style={styles.main}>
         <PlateCanvas state={state} dispatch={dispatch} clipboardRef={clipboardRef} />
         <Inspector state={state} values={values} dispatch={dispatch} />
       </main>
       <StatusBar state={state} />
     </div>
+    <style jsx global>{`
+      @media (max-width: 700px) {
+        .routine-designer-v2 {
+          grid-template-rows: auto minmax(0, 1fr) 34px !important;
+          min-width: 0;
+        }
+        .routine-designer-toolbar {
+          gap: 6px !important;
+          overflow-x: auto;
+          padding: 6px 8px !important;
+          scrollbar-width: none;
+        }
+        .routine-designer-toolbar::-webkit-scrollbar { display: none; }
+        .routine-designer-toolbar button,
+        .routine-designer-toolbar label,
+        .routine-designer-toolbar select,
+        .routine-designer-toolbar input {
+          flex: 0 0 auto;
+          white-space: nowrap;
+        }
+        .routine-designer-filename { width: 150px !important; }
+        .routine-designer-runtime { display: none; }
+        .routine-designer-main {
+          display: flex !important;
+          flex-direction: column;
+          min-width: 0;
+          overflow: auto;
+        }
+        .routine-designer-canvas {
+          flex: 1 1 auto;
+          overflow: auto !important;
+          padding: 8px !important;
+        }
+        .routine-designer-plate-grid {
+          grid-template-columns: minmax(320px, 1fr) !important;
+          justify-content: start !important;
+          min-width: 320px;
+          width: 100%;
+        }
+        .routine-designer-plate-section { min-width: 0; width: 100%; }
+        .routine-designer-inspector {
+          width: 100% !important;
+          max-height: 250px;
+          border-left: none !important;
+          border-top: 1px solid ${colors.border};
+        }
+      }
+    `}</style>
+    </>
   );
 };
 

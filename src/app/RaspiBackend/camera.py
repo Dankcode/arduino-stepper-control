@@ -1,5 +1,5 @@
-import os
 import argparse
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -8,24 +8,15 @@ from config import DEFAULT_EXPOSURE_TIME_US, PICTURES_DIR
 # --- Third-party library import ---
 try:
     from picamera2 import Picamera2
-except ImportError:
-    print("WARNING: The 'picamera2' library not found. Using mock camera.")
-    class Picamera2:
-        def __init__(self): pass
-        def create_still_configuration(self): return {}
-        def configure(self, config): pass
-        def start(self): print("Camera start simulated.")
-        def set_controls(self, controls): pass
-        def capture_file(self, path): print(f"Simulated capture to {path}")
-        def stop(self): print("Camera stop simulated.")
-        def capture_metadata(self): pass
-        @property
-        def started(self): return True
+    CAMERA_IMPORT_ERROR = None
+except ImportError as exc:
+    Picamera2 = None
+    CAMERA_IMPORT_ERROR = str(exc)
 
 # --- Configuration ---
 BASE_SAVE_DIR = PICTURES_DIR
 
-def configure_camera(picam2: Picamera2, exposure_time: int):
+def configure_camera(picam2, exposure_time: int):
     """Initializes and configures the camera with manual exposure."""
     config = picam2.create_still_configuration()
     picam2.configure(config)
@@ -42,6 +33,11 @@ def configure_camera(picam2: Picamera2, exposure_time: int):
 
 def capture_single_image(exposure_time: int, output_path: Path):
     """Generic function to initialize camera, capture, and save one image."""
+    if Picamera2 is None:
+        raise RuntimeError(
+            "picamera2 is unavailable. Install python3-picamera2 and create the "
+            f"agent venv with --system-site-packages ({CAMERA_IMPORT_ERROR})."
+        )
     picam2 = None
     try:
         picam2 = Picamera2()
@@ -56,13 +52,17 @@ def capture_single_image(exposure_time: int, output_path: Path):
         print(f"  -> Saving image to: {output_path}")
         picam2.capture_file(str(output_path))
         print("Capture complete.")
-
-    except Exception as e:
-        print(f"\nAn error occurred during camera operation: {e}")
     finally:
-        # 4. Stop camera safely
-        if picam2 and getattr(picam2, 'started', False):
-            picam2.stop()
+        # Stop and close even if capture fails so the next attempt can use the sensor.
+        if picam2:
+            try:
+                if getattr(picam2, 'started', False):
+                    picam2.stop()
+            finally:
+                try:
+                    picam2.close()
+                except Exception:
+                    pass
 
 # --- Capture Modes ---
 
@@ -118,13 +118,17 @@ def main():
     
     args = parser.parse_args()
     
-    if args.mode == 'manual':
-        manual_snapshot(args.exposure)
-        
-    elif args.mode == 'routine':
-        if not args.output_path:
-            parser.error("--output-path is required when --mode is 'routine'")
-        routine_well_capture(args.exposure, Path(args.output_path))
+    try:
+        if args.mode == 'manual':
+            manual_snapshot(args.exposure)
+        elif args.mode == 'routine':
+            if not args.output_path:
+                parser.error("--output-path is required when --mode is 'routine'")
+            routine_well_capture(args.exposure, Path(args.output_path))
+    except Exception as exc:
+        print(f"ERROR: Camera capture failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

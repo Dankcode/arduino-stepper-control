@@ -2,7 +2,7 @@ flask
 flask-cors
 pyserial
 
-# Raspberry Pi hardware packages. Install through apt where possible:
-# python3-picamera2
-# python3-rpi.gpio
-# python3-opencv
+# Raspberry Pi hardware packages are supplied by apt, not pip. Install these
+# before creating the venv, then use --system-site-packages so this interpreter
+# can import them:
+#   sudo apt install -y python3-picamera2 python3-rpi.gpio
