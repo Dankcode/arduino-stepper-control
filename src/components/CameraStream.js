@@ -8,9 +8,22 @@ const CameraStream = ({ PI_BACKEND_URL }) => {
 
   const STREAM_URL = `${PI_BACKEND_URL}/api/camera/stream`;
 
-  const startStream = () => {
+  const startStream = async () => {
     setError('');
-    setStreaming(true);
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/api/camera/status`, { cache: 'no-store' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.available === false) {
+        const details = Array.isArray(data.details) && data.details.length
+          ? ` ${data.details.join(' | ')}`
+          : '';
+        throw new Error(`${data.message || 'Camera stream is unavailable.'}${details}`);
+      }
+      setStreaming(true);
+    } catch (err) {
+      setError(err.message || 'Stream unavailable - check that the Pi backend is running and the camera is connected.');
+      setStreaming(false);
+    }
   };
 
   const stopStream = () => {
@@ -20,7 +33,7 @@ const CameraStream = ({ PI_BACKEND_URL }) => {
   };
 
   const handleImgError = () => {
-    setError('Stream unavailable - check that the Pi backend is running and the camera is connected.');
+    setError(`Stream unavailable from ${STREAM_URL}. Check the Pi camera cable, picamera2, and opencv installation.`);
     setStreaming(false);
   };
 

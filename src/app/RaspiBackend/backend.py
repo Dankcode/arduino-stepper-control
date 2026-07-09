@@ -7,6 +7,7 @@ motion/progress routes used by RoutineDesignerV2.
 
 from collections import deque
 from datetime import datetime
+import glob
 import io
 import os
 import sqlite3
@@ -260,6 +261,7 @@ def _safe_child(base_dir, relative_path):
 # --------------------------------------------------------------------------
 class SerialLink:
     def __init__(self, port=SERIAL_PORT, baud=BAUD_RATE):
+        self.configured_port = port
         self.port = port
         self.baud = baud
         self.conn = None
@@ -269,11 +271,50 @@ class SerialLink:
     def connected(self):
         return self.conn is not None and getattr(self.conn, "is_open", False)
 
+    def available_ports(self):
+        ports = []
+        if serial is not None:
+            try:
+                from serial.tools import list_ports
+                ports.extend(port.device for port in list_ports.comports())
+            except Exception:
+                pass
+        patterns = [
+            "/dev/ttyUSB*",
+            "/dev/ttyACM*",
+            "/dev/ttyAMA*",
+            "/dev/serial/by-id/*",
+            "/dev/tty.usbmodem*",
+            "/dev/tty.usbserial*",
+            "/dev/cu.usbmodem*",
+            "/dev/cu.usbserial*",
+        ]
+        for pattern in patterns:
+            ports.extend(glob.glob(pattern))
+        return sorted(dict.fromkeys(ports))
+
+    def resolve_port(self):
+        configured = str(self.configured_port)
+        if configured and Path(configured).exists():
+            return configured
+        for candidate in self.available_ports():
+            if candidate:
+                return candidate
+        return configured
+
     def connect(self):
         if serial is None:
             return False, "pyserial is not installed."
         if self.connected:
             return True, f"Already connected to {self.port}."
+        self.port = self.resolve_port()
+        if not self.port or not Path(self.port).exists():
+            available = self.available_ports()
+            detail = ", ".join(available) if available else "none"
+            return False, (
+                f"Serial port '{self.configured_port}' was not found. "
+                f"Detected ports: {detail}. Set STEPPER_SERIAL_PORT to the Arduino device path."
+            )
         self.conn = serial.Serial(self.port, self.baud, timeout=SERIAL_TIMEOUT, write_timeout=SERIAL_TIMEOUT)
         time.sleep(2)
         self.conn.reset_input_buffer()
@@ -753,15 +794,17 @@ def get_logs():
 # --------------------------------------------------------------------------
 @app.route("/api/status", methods=["GET"])
 def api_status():
-    firmware = None
-    if serial_link.connected and not routine_runner.running:
-        ok, reply = serial_link.command("?")
-        firmware = reply if ok else None
     with serial_lock:
+        firmware = None
+        if serial_link.connected and not routine_runner.running:
+            ok, reply = serial_link.command("?")
+            firmware = reply if ok else None
         return jsonify({
             "connected": serial_link.connected,
             "current_steps": serial_link.current_steps,
             "port": serial_link.port,
+            "configured_port": serial_link.configured_port,
+            "available_ports": serial_link.available_ports(),
             "routine_running": routine_runner.running,
             "firmware": firmware,
         })
@@ -837,6 +880,31 @@ def camera_take_picture():
     if result.returncode == 0:
         return jsonify({"success": True, "message": "Picture capture complete.", "output": result.stdout})
     return jsonify({"success": False, "message": result.stderr.strip() or "Camera script failed.", "output": result.stderr}), 500
+
+
+@app.route("/api/camera/status", methods=["GET"])
+def camera_status():
+    missing = []
+    try:
+        from picamera2 import Picamera2  # noqa: F401
+    except ImportError as exc:
+        missing.append(f"picamera2: {exc}")
+    try:
+        import cv2  # noqa: F401
+    except ImportError as exc:
+        missing.append(f"opencv/cv2: {exc}")
+
+    if missing:
+        return jsonify({
+            "available": False,
+            "message": "Camera stream dependencies are unavailable on this backend.",
+            "details": missing,
+        }), 503
+
+    return jsonify({
+        "available": True,
+        "message": "Camera stream dependencies are available.",
+    })
 
 
 @app.route("/api/camera/stream", methods=["GET"])
