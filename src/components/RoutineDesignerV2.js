@@ -9,7 +9,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { Check, ChevronLeft, ChevronRight, Play, Save, Upload } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Download, Play, Save, Upload } from 'lucide-react';
 import ProgressBar from './ui/ProgressBar';
 import { useToast } from './ui/StatusToast';
 import { colors, font, radii, shadows, motion } from './ui/tokens';
@@ -247,7 +247,7 @@ const formatSeconds = (value) => {
   return `${seconds}s`;
 };
 
-const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, running, onSave, onRun, onImport }) {
+const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, running, onSave, onRun, onImport, onExport }) {
   return (
     <div className="routine-designer-toolbar" style={styles.toolbar}>
       <input
@@ -269,6 +269,10 @@ const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, runnin
         Import
         <input type="file" accept="application/json,.json" onChange={onImport} style={{ display: 'none' }} />
       </label>
+      <button type="button" onClick={onExport} disabled={!state.filename} style={styles.secondaryButton}>
+        <Download size={16} />
+        Export
+      </button>
       <select
         value={state.schedule.repeatInterval}
         onChange={(event) => dispatch({ type: 'SET_SCHEDULE', schedule: { repeatInterval: event.target.value } })}
@@ -642,16 +646,41 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
         }),
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'Save failed.');
+      if (!response.ok) throw new Error(data.error || `Backend rejected the save (HTTP ${response.status}).`);
       dispatch({ type: 'SET_SAVE_STATE', saveState: 'saved' });
       toast.success(data.message || 'Routine saved.');
     } catch (error) {
       dispatch({ type: 'SET_SAVE_STATE', saveState: 'error' });
-      toast.error(error.message);
+      const message = error instanceof TypeError
+        ? `Could not reach the backend at ${PI_BACKEND_URL}. Is it running? (See scripts/run_backend_local.sh to run one locally.)`
+        : error.message;
+      toast.error(message);
     } finally {
       setSaving(false);
     }
   }, [PI_BACKEND_URL, state.filename, state.plates, state.schedule, toast]);
+
+  // Export the routine as a portable JSON file in the same format the Import
+  // button (and the old RoutineBuilder) accepts: { filename, well_data: [...] }.
+  const handleExport = useCallback(() => {
+    const payload = {
+      filename: state.filename || 'routine',
+      well_data: flattenPlates(state.plates),
+      startTime: state.schedule.startTime,
+      repeatInterval: state.schedule.repeatInterval,
+      repeatCount: Number(state.schedule.repeatCount) || 1,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${payload.filename}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${payload.filename}.json`);
+  }, [state.filename, state.plates, state.schedule, toast]);
 
   const handleImport = useCallback((event) => {
     const file = event.target.files?.[0];
@@ -724,6 +753,7 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
         onSave={handleSave}
         onRun={handleRun}
         onImport={handleImport}
+        onExport={handleExport}
       />
       <main className="routine-designer-main" style={styles.main}>
         <PlateCanvas state={state} dispatch={dispatch} clipboardRef={clipboardRef} />

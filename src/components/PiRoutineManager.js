@@ -468,6 +468,31 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus, onEditRoutine }) =
     }
   };
 
+  // Download a routine as a portable JSON file ({ filename, well_data, schedule }),
+  // the same format the designer's Import button accepts.
+  const handleDownloadRoutine = async (filename) => {
+    const routineBaseName = filename.replace('.sql', '');
+    try {
+      const response = await fetch(
+        `${PI_BACKEND_URL}/routines/detail?filename=${encodeURIComponent(routineBaseName)}`,
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `Download failed (HTTP ${response.status}).`);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${routineBaseName}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Error downloading routine:', error);
+      setScheduleError(`Could not download routine: ${error.message}`);
+    }
+  };
+
   const moveToActive = async (filename) => {
     const routineBaseName = filename.replace('.sql', '');
     try {
@@ -1008,6 +1033,12 @@ const PiRoutineManager = ({ PI_BACKEND_URL, connectionStatus, onEditRoutine }) =
                     onClick={() => handleEditRoutine(selectedRoutine.name)}
                     className="edit-button-sql">
                     Edit
+                  </button>
+                  <button
+                    onClick={() => handleDownloadRoutine(selectedRoutine.name)}
+                    className="rename-button"
+                    title="Download this routine as a portable JSON file">
+                    Download
                   </button>
                   <button onClick={handleRenameClick} className="rename-button">
                     Rename

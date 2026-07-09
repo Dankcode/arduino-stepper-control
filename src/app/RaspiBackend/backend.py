@@ -75,6 +75,13 @@ def get_db():
     return conn
 
 
+def _ensure_column(conn, table, column, definition):
+    """Add a known migration column when opening a database from an older release."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db(conn=None):
     should_close = conn is None
     conn = conn or sqlite3.connect(DATABASE_FILE)
@@ -123,10 +130,27 @@ def init_db(conn=None):
             value TEXT NOT NULL
         );
     """)
-    try:
-        conn.execute("ALTER TABLE well_data ADD COLUMN layout TEXT DEFAULT '96-well'")
-    except sqlite3.OperationalError:
-        pass
+    # Existing Pi installations predate the V2 schedule/layout columns. CREATE
+    # TABLE IF NOT EXISTS does not add them, so migrate in place before routes
+    # query or write those fields. This preserves every saved routine.
+    _ensure_column(conn, "well_data", "layout", "TEXT DEFAULT '96-well'")
+    _ensure_column(conn, "routine_schedule", "repeat_interval", "TEXT DEFAULT 'daily'")
+    _ensure_column(conn, "routine_schedule", "repeat_count", "INTEGER DEFAULT 1")
+    conn.execute("""
+        UPDATE well_data
+        SET layout = '96-well'
+        WHERE layout IS NULL OR TRIM(layout) = ''
+    """)
+    conn.execute("""
+        UPDATE routine_schedule
+        SET repeat_interval = 'daily'
+        WHERE repeat_interval IS NULL OR TRIM(repeat_interval) = ''
+    """)
+    conn.execute("""
+        UPDATE routine_schedule
+        SET repeat_count = 1
+        WHERE repeat_count IS NULL OR repeat_count < 1
+    """)
     conn.commit()
     if should_close:
         conn.close()
@@ -614,7 +638,7 @@ routine_runner = RoutineRunner()
 # --------------------------------------------------------------------------
 # Bump when routes change so a stale Pi deploy is obvious from the browser:
 # open <backend-url>/ and compare against this file.
-BACKEND_VERSION = "2026-07-10.2"
+BACKEND_VERSION = "2026-07-10.3"
 
 
 @app.route("/", methods=["GET"])
@@ -666,11 +690,22 @@ def save_routine_sql():
                 data.get("repeatInterval") or "daily",
                 data.get("repeatCount") or 1,
             )
+        saved_well_count = conn.execute(
+            "SELECT COUNT(*) FROM well_data WHERE filename = ?", (filename,)
+        ).fetchone()[0]
         conn.commit()
-        return jsonify({"message": f"Routine '{filename}' saved successfully."})
-    except (ValueError, sqlite3.Error) as exc:
+        return jsonify({
+            "message": f"Routine '{filename}' saved to SQLite ({saved_well_count} wells).",
+            "filename": filename,
+            "well_count": saved_well_count,
+            "storage": "sqlite",
+        })
+    except ValueError as exc:
         conn.rollback()
         return jsonify({"error": str(exc)}), 400
+    except sqlite3.Error as exc:
+        conn.rollback()
+        return jsonify({"error": f"Routine database write failed: {exc}"}), 500
     finally:
         conn.close()
 
@@ -758,6 +793,8 @@ def routines_detail():
                 "repeatCount": schedule["repeat_count"] or 1,
             } if schedule else None,
         })
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"Could not load routine data: {exc}"}), 500
     finally:
         conn.close()
 

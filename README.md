@@ -59,6 +59,20 @@ cd /home/dank/backend
 python3 backend
 ```
 
+## Routine Storage
+
+`POST /save_routine_sql` is a legacy route name. It saves routines as rows in the
+SQLite database at `$STEPPER_DATABASE_FILE`, which defaults to
+`$STEPPER_PI_HOME/routine_data.db` (`/home/dank/routine_data.db` on the Pi), not
+as individual `.sql` files. The backend automatically upgrades older databases
+when it starts, including the schedule columns required by the current routine designer.
+
+To inspect the Pi database after a save:
+
+```bash
+sqlite3 /home/dank/routine_data.db 'SELECT filename FROM routines ORDER BY filename;'
+```
+
 ## Firmware
 
 Open `firmware/stepper_controller_v2/stepper_controller_v2.ino` in the Arduino IDE or CLI and upload it to the controller board. The V2 protocol is required for streamed routine moves and mid-move Abort; the legacy V1 sketch remains in the tree for manual-control compatibility during migration.
