@@ -9,7 +9,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { Check, ChevronLeft, ChevronRight, Save, Upload } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Play, Save, Upload } from 'lucide-react';
 import ProgressBar from './ui/ProgressBar';
 import { useToast } from './ui/StatusToast';
 import { colors, font, radii, shadows, motion } from './ui/tokens';
@@ -246,7 +246,7 @@ const formatSeconds = (value) => {
   return `${seconds}s`;
 };
 
-const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, onSave, onImport }) {
+const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, running, onSave, onRun, onImport }) {
   return (
     <div style={styles.toolbar}>
       <input
@@ -257,6 +257,10 @@ const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, onSave
       />
       <button type="button" onClick={onSave} disabled={saving || !state.filename} style={styles.primaryButton}>
         {saving ? <ProgressBar size="sm" /> : <><Save size={16} /> Save</>}
+      </button>
+      <button type="button" onClick={onRun} disabled={running || !state.filename} style={styles.secondaryButton}>
+        <Play size={16} />
+        {running ? 'Starting...' : 'Run now'}
       </button>
       <label style={styles.secondaryButton}>
         <Upload size={16} />
@@ -538,6 +542,7 @@ const StatusBar = memo(function StatusBar({ state }) {
 const RoutineDesignerV2 = ({ PI_BACKEND_URL }) => {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
   const clipboardRef = useRef(null);
   const toast = useToast();
   const runtime = useRuntimeEstimate(PI_BACKEND_URL, state.plates);
@@ -595,9 +600,55 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL }) => {
     event.target.value = '';
   }, [toast]);
 
+  const handleRun = useCallback(async () => {
+    if (!state.filename) {
+      toast.error('Routine name is required.');
+      return;
+    }
+    setRunning(true);
+    try {
+      const saveResponse = await fetch(`${PI_BACKEND_URL}/save_routine_sql`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: state.filename,
+          well_data: flattenPlates(state.plates),
+          repeatCount: Number(state.schedule.repeatCount) || 1,
+          startTime: state.schedule.startTime,
+          repeatInterval: state.schedule.repeatInterval,
+        }),
+      });
+      const saveData = await saveResponse.json().catch(() => ({}));
+      if (!saveResponse.ok) throw new Error(saveData.error || 'Save before run failed.');
+      dispatch({ type: 'SET_SAVE_STATE', saveState: 'saved' });
+
+      const response = await fetch(`${PI_BACKEND_URL}/api/routine/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: state.filename, plate: 1 }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.message || 'Failed to start routine.');
+      toast.success(data.message || 'Routine started.');
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setRunning(false);
+    }
+  }, [PI_BACKEND_URL, state.filename, state.plates, state.schedule, toast]);
+
   return (
     <div style={styles.root}>
-      <Toolbar state={state} dispatch={dispatch} runtime={runtime} saving={saving} onSave={handleSave} onImport={handleImport} />
+      <Toolbar
+        state={state}
+        dispatch={dispatch}
+        runtime={runtime}
+        saving={saving}
+        running={running}
+        onSave={handleSave}
+        onRun={handleRun}
+        onImport={handleImport}
+      />
       <main style={styles.main}>
         <PlateCanvas state={state} dispatch={dispatch} clipboardRef={clipboardRef} />
         <Inspector state={state} values={values} dispatch={dispatch} />

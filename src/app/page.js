@@ -2,9 +2,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import StepperMotorControl from '../components/ManualControl';
 import RoutineBuilder from '../components/RoutineBuilder';
+import RoutineDesignerV2 from '../components/RoutineDesignerV2';
 import PiRoutineManager from '../components/PiRoutineManager';
 import PictureBrowser from '../components/PictureBrowser';
 import CameraStream from '../components/CameraStream';
+import ProgressBar, { useRoutineProgress } from '../components/ui/ProgressBar';
+import ConnectionBadge from '../components/ui/ConnectionBadge';
+import Button from '../components/ui/Button';
+import { useToast } from '../components/ui/StatusToast';
 
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
 const DEFAULT_PI_BACKEND_URL = process.env.NEXT_PUBLIC_PI_BACKEND_URL || 'http://localhost:5000';
@@ -12,9 +17,15 @@ const DEFAULT_PI_BACKEND_URL = process.env.NEXT_PUBLIC_PI_BACKEND_URL || 'http:/
 export default function Home() {
   const [activeTab, setActiveTab] = useState('routine');
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
+  const [backendStatus, setBackendStatus] = useState(null);
   const [lastCheckedAt, setLastCheckedAt] = useState(null);
   // The backend URL for the Raspberry Pi. Set NEXT_PUBLIC_PI_BACKEND_URL for LAN deployments.
   const PI_BACKEND_URL = useMemo(() => DEFAULT_PI_BACKEND_URL.replace(/\/$/, ''), []);
+  const routineProgress = useRoutineProgress(PI_BACKEND_URL);
+  const toast = useToast();
+  const useLegacyRoutineBuilder = typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search).get('legacy') === '1'
+    : false;
 
   const checkConnectionAndFetchData = useCallback(async () => {
     setConnectionStatus('Connecting...');
@@ -22,7 +33,7 @@ export default function Home() {
     const timeoutId = setTimeout(() => controller.abort(), CONNECTION_TIMEOUT);
 
     try {
-      const response = await fetch(`${PI_BACKEND_URL}`, {
+      const response = await fetch(`${PI_BACKEND_URL}/api/status`, {
         cache: 'no-store',
         signal: controller.signal,
       });
@@ -30,9 +41,12 @@ export default function Home() {
       if (!response.ok) {
         throw new Error('Network response was not ok');
       }
+      const data = await response.json();
+      setBackendStatus(data);
       setConnectionStatus('Connected');
     } catch (error) {
       console.error('Failed to connect to Raspberry Pi:', error);
+      setBackendStatus(null);
       setConnectionStatus('Disconnected');
     } finally {
       clearTimeout(timeoutId);
@@ -46,14 +60,17 @@ export default function Home() {
     return () => clearInterval(intervalId);
   }, [checkConnectionAndFetchData]);
 
-  const getStatusIndicatorClass = () => {
-    if (connectionStatus === 'Connected') {
-      return 'status-indicator-dot connected';
-    } else if (connectionStatus === 'Connecting...') {
-      return 'status-indicator-dot connecting';
+  const handleAbortRoutine = useCallback(async () => {
+    if (!window.confirm('Stop the running routine now?')) return;
+    try {
+      const response = await fetch(`${PI_BACKEND_URL}/api/routine/abort`, { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.message || 'Failed to stop routine.');
+      toast.info(data.message || 'Routine stop requested.');
+    } catch (error) {
+      toast.error(error.message);
     }
-    return 'status-indicator-dot disconnected';
-  };
+  }, [PI_BACKEND_URL, toast]);
 
   return (
     <div className="main-wrapper">
@@ -76,40 +93,25 @@ export default function Home() {
           position: relative;
         }
 
-        .connection-status-box {
+        .top-status-box {
           position: absolute;
           top: 0.75rem;
           right: 1rem;
-          padding: 0.4rem 0.8rem;
-          background-color: #1e293b;
-          border-radius: 0.375rem;
-          border: 1px solid #334155;
           display: flex;
           align-items: center;
           gap: 0.5rem;
-          font-size: 0.75rem;
-          font-weight: 600;
-          color: #94a3b8;
           z-index: 100;
         }
 
-        .backend-url {
-          color: #64748b;
-          font-family: var(--font-mono);
-          font-size: 0.68rem;
-        }
-        
-        .status-indicator-dot {
-          height: 0.5rem;
-          width: 0.5rem;
-          border-radius: 50%;
-        }
-        
-        .status-indicator-dot.connected { background-color: #10b981; box-shadow: 0 0 8px #10b981; }
-        .status-indicator-dot.connecting { background-color: #f59e0b; animation: pulse 2s infinite; }
-        .status-indicator-dot.disconnected { background-color: #ef4444; }
-
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+
+        .global-progress {
+          position: absolute;
+          top: 3.35rem;
+          left: 1rem;
+          right: 1rem;
+          z-index: 80;
+        }
 
         .tab-section {
           background-color: #0f172a;
@@ -210,14 +212,25 @@ export default function Home() {
         }
       `}</style>
 
-      <div className="connection-status-box">
-        <div className={getStatusIndicatorClass()}></div>
-        {connectionStatus}
-        <span className="backend-url">{PI_BACKEND_URL}</span>
-        {lastCheckedAt && (
-          <span className="backend-url">Checked {lastCheckedAt.toLocaleTimeString()}</span>
+      <div className="top-status-box">
+        <ConnectionBadge
+          status={connectionStatus}
+          url={PI_BACKEND_URL}
+          routineRunning={backendStatus?.routine_running || routineProgress.running}
+          checkedAt={lastCheckedAt ? `Checked ${lastCheckedAt.toLocaleTimeString()}` : null}
+        />
+        {(backendStatus?.routine_running || routineProgress.running) && (
+          <Button variant="danger" size="sm" onClick={handleAbortRoutine}>
+            Stop
+          </Button>
         )}
       </div>
+
+      {(backendStatus?.routine_running || routineProgress.running) && (
+        <div className="global-progress">
+          <ProgressBar value={routineProgress.value} label={routineProgress.label} tone="info" size="sm" />
+        </div>
+      )}
 
       <div className="tab-section">
         <nav className="tab-nav">
@@ -225,7 +238,7 @@ export default function Home() {
             onClick={() => setActiveTab('routine')}
             className={`tab-button ${activeTab === 'routine' ? 'active' : 'inactive'}`}
           >
-            Routine Builder
+            {useLegacyRoutineBuilder ? 'Routine Builder' : 'Routine Designer'}
           </button>
           <button
             onClick={() => setActiveTab('manual')}
@@ -255,7 +268,11 @@ export default function Home() {
       </div>
 
       <div className="tab-content">
-        {activeTab === 'routine' && <RoutineBuilder PI_BACKEND_URL={PI_BACKEND_URL} />}
+        {activeTab === 'routine' && (
+          useLegacyRoutineBuilder
+            ? <RoutineBuilder PI_BACKEND_URL={PI_BACKEND_URL} />
+            : <RoutineDesignerV2 PI_BACKEND_URL={PI_BACKEND_URL} />
+        )}
         {activeTab === 'manual' && <StepperMotorControl PI_BACKEND_URL={PI_BACKEND_URL} />}
         {activeTab === 'pi' && (
           <PiRoutineManager

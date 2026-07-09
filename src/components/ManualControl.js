@@ -1,13 +1,26 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useToast } from './ui/StatusToast';
 
 const StepperMotorControl = ({ PI_BACKEND_URL }) => {
   const [steps, setSteps] = useState(400);
   const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [pendingAction, setPendingAction] = useState(null);
   const [manualExposure, setManualExposure] = useState(50000);
   const [blueLightOn, setBlueLightOn] = useState(false);
   const [wellTestProgress, setWellTestProgress] = useState('');
+  const toast = useToast();
+  const loading = Boolean(pendingAction);
+  const motionBusy = [
+    'x-forward',
+    'x-backward',
+    'zy-forward',
+    'zy-backward',
+    'enable',
+    'disable',
+    'test',
+    'well-test',
+  ].includes(pendingAction);
 
   const API_BASE = useMemo(() => `${PI_BACKEND_URL.replace(/\/$/, '')}/api`, [PI_BACKEND_URL]);
 
@@ -36,7 +49,7 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
 
   // --- NEW FUNCTION: Manual Blue Light Control ---
   const handleBlueLightToggle = async (targetState) => {
-    setLoading(true);
+    setPendingAction('light');
     try {
       const response = await fetch(`${API_BASE}/bluelight/manual`, {
         method: 'POST',
@@ -48,42 +61,55 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
       if (data.success) {
         setBlueLightOn(targetState === 'on');
         setMessage(data.message);
+        toast.success(data.message);
       } else {
         setMessage(`Light error: ${data.message}`);
+        toast.error(data.message || 'Blue light command failed.');
       }
     } catch (error) {
       setMessage('Failed to reach blue light API');
+      toast.error('Failed to reach blue light API');
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   };
 
   // --- API Functions (Existing) ---
   const handleConnect = async () => {
-    setLoading(true);
+    setPendingAction('connect');
     try {
       const response = await fetch(`${API_BASE}/connect`, { method: 'POST' });
       const data = await response.json();
       setMessage(data.message);
-      if (data.success) setConnected(true);
+      if (data.success) {
+        setConnected(true);
+        toast.success(data.message);
+      } else {
+        toast.error(data.message || 'Failed to connect to Arduino');
+      }
     } catch (error) {
       setMessage('Failed to connect to Arduino');
+      toast.error('Failed to connect to Arduino');
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   };
 
   const handleDisconnect = async () => {
-    setLoading(true);
+    setPendingAction('disconnect');
     try {
       const response = await fetch(`${API_BASE}/disconnect`, { method: 'POST' });
       const data = await response.json();
       setMessage(data.message);
-      if (data.success) setConnected(false);
+      if (data.success) {
+        setConnected(false);
+        toast.info(data.message);
+      }
     } catch (error) {
       setMessage('Failed to disconnect');
+      toast.error('Failed to disconnect');
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   };
 
@@ -91,9 +117,11 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
     const parsedSteps = Number.parseInt(steps, 10);
     if (!Number.isFinite(parsedSteps) || parsedSteps <= 0) {
       setMessage('Step amount must be a positive integer');
+      toast.error('Step amount must be a positive integer');
       return;
     }
 
+    setPendingAction('steps');
     try {
       const response = await fetch(`${API_BASE}/steps`, {
         method: 'POST',
@@ -106,31 +134,39 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
       if (response.ok) {
         setSteps(parsedSteps);
         localStorage.setItem('cnc_default_steps', String(parsedSteps));
+        toast.success(data.message);
+      } else {
+        toast.error(data.message || 'Failed to update steps');
       }
     } catch (error) {
       setMessage('Failed to update steps');
+      toast.error('Failed to update steps');
+    } finally {
+      setPendingAction(null);
     }
   };
 
   const sendMotorCommand = async (endpoint) => {
     if (!connected) { setMessage('Arduino not connected'); return; }
-    setLoading(true);
+    setPendingAction(endpoint);
     try {
       const response = await fetch(`${API_BASE}/motor/${endpoint}`, { method: 'POST' });
       const data = await response.json();
       setMessage(data.message);
+      if (!response.ok) throw new Error(data.message || `Failed to send ${endpoint}`);
       await new Promise(resolve => setTimeout(resolve, 500));
     } catch (error) {
       setMessage(`Failed to send ${endpoint} command`);
+      toast.error(error.message || `Failed to send ${endpoint} command`);
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   };
 
   // --- Well Navigation Test: A1 to A2 to B1 to Home ---
   const handleWellTest = async () => {
     if (!connected) { setMessage('Arduino not connected'); return; }
-    setLoading(true);
+    setPendingAction('well-test');
     setWellTestProgress('Starting well test...');
     const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -153,8 +189,9 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
     } catch (err) {
       setWellTestProgress('Well test failed.');
       setMessage(`Well test error: ${err.message}`);
+      toast.error(`Well test error: ${err.message}`);
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   };
 
@@ -168,7 +205,7 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
 
   const handleTakePicture = async () => {
     if (manualExposure <= 0) { setMessage('Error: Exposure time must be > 0'); return; }
-    setLoading(true);
+    setPendingAction('picture');
     try {
       const response = await fetch(`${API_BASE}/camera/take-picture`, {
         method: 'POST',
@@ -181,11 +218,13 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || 'Picture command failed');
       setMessage(data.message);
+      toast.success(data.message);
       await new Promise(resolve => setTimeout(resolve, 3000));
     } catch (error) {
       setMessage(`Error: ${error.message}`);
+      toast.error(error.message);
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   };
 
@@ -331,8 +370,8 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
             </span>
           </div>
           <div className="flex-buttons-group">
-            <button onClick={handleConnect} disabled={loading || connected} className="btn btn-connect">Connect</button>
-            <button onClick={handleDisconnect} disabled={loading || !connected} className="btn btn-disconnect">Disconnect</button>
+            <button onClick={handleConnect} disabled={pendingAction === 'connect' || connected} className="btn btn-connect">Connect</button>
+            <button onClick={handleDisconnect} disabled={pendingAction === 'disconnect' || !connected} className="btn btn-disconnect">Disconnect</button>
           </div>
         </div>
 
@@ -343,7 +382,7 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
             <button
               onClick={() => handleBlueLightToggle(blueLightOn ? 'off' : 'on')}
               className={`btn-motor cyan ${blueLightOn ? 'active' : ''}`}
-              disabled={loading}
+              disabled={pendingAction === 'light'}
             >
               {blueLightOn ? 'BLUE LIGHT: ON' : 'BLUE LIGHT: OFF'}
             </button>
@@ -362,22 +401,22 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
           <label className="input-label">Step Amount (Current: {steps}):</label>
           <div className="flex-buttons-group">
             <input type="number" value={steps} onChange={(e) => setSteps(e.target.value)} className="input-field" min="1" />
-            <button onClick={updateSteps} className="btn btn-update-steps">Update</button>
+            <button onClick={updateSteps} disabled={pendingAction === 'steps'} className="btn btn-update-steps">Update</button>
           </div>
         </div>
 
         <div className="motor-buttons-group">
-          <button onClick={() => sendMotorCommand('x-forward')} disabled={loading || !connected} className="btn-motor blue">X Forward</button>
-          <button onClick={() => sendMotorCommand('x-backward')} disabled={loading || !connected} className="btn-motor blue">X Backward</button>
-          <button onClick={() => sendMotorCommand('zy-forward')} disabled={loading || !connected} className="btn-motor purple">Z+Y Forward</button>
-          <button onClick={() => sendMotorCommand('zy-backward')} disabled={loading || !connected} className="btn-motor purple">Z+Y Backward</button>
+          <button onClick={() => sendMotorCommand('x-forward')} disabled={motionBusy || !connected} className="btn-motor blue">X Forward</button>
+          <button onClick={() => sendMotorCommand('x-backward')} disabled={motionBusy || !connected} className="btn-motor blue">X Backward</button>
+          <button onClick={() => sendMotorCommand('zy-forward')} disabled={motionBusy || !connected} className="btn-motor purple">Z+Y Forward</button>
+          <button onClick={() => sendMotorCommand('zy-backward')} disabled={motionBusy || !connected} className="btn-motor purple">Z+Y Backward</button>
           <div className="flex-buttons-group">
-            <button onClick={() => sendMotorCommand('enable')} disabled={loading || !connected} className="btn-motor green">Enable</button>
-            <button onClick={() => sendMotorCommand('disable')} disabled={loading || !connected} className="btn-motor red">Disable</button>
+            <button onClick={() => sendMotorCommand('enable')} disabled={motionBusy || !connected} className="btn-motor green">Enable</button>
+            <button onClick={() => sendMotorCommand('disable')} disabled={motionBusy || !connected} className="btn-motor red">Disable</button>
           </div>
-          <button onClick={handleTakePicture} disabled={loading || !connected} className="btn-motor orange">Take Picture</button>
-          <button onClick={() => sendMotorCommand('test')} disabled={loading || !connected} className="btn-motor yellow">Test Motors</button>
-          <button onClick={handleWellTest} disabled={loading || !connected} className="btn-motor teal">Well Test (A1 to A2 to B1 to Home)</button>
+          <button onClick={handleTakePicture} disabled={pendingAction === 'picture' || !connected} className="btn-motor orange">Take Picture</button>
+          <button onClick={() => sendMotorCommand('test')} disabled={motionBusy || !connected} className="btn-motor yellow">Test Motors</button>
+          <button onClick={handleWellTest} disabled={motionBusy || !connected} className="btn-motor teal">Well Test (A1 to A2 to B1 to Home)</button>
           {wellTestProgress && <div className="well-test-progress">{wellTestProgress}</div>}
         </div>
 

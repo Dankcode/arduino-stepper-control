@@ -316,6 +316,8 @@ class SerialLink:
                     last = line
                     if line.startswith("ERR:"):
                         return False, line
+                    if line.startswith("OK:aborted"):
+                        return False, line
                     if line.startswith("OK:done"):
                         return True, line
                 return False, f"Timed out waiting for move completion after {last!r}."
@@ -326,8 +328,207 @@ class SerialLink:
             self.disconnect()
             return False, f"Serial communication error: {exc}"
 
+    def abort(self):
+        if not self.connected:
+            return False, "Arduino is not connected."
+        try:
+            self.conn.write(b"!\n")
+            return True, "Abort sent."
+        except Exception as exc:
+            self.disconnect()
+            return False, f"Serial abort error: {exc}"
+
 
 serial_link = SerialLink()
+
+
+class RoutineRunner:
+    """In-process routine executor; the backend remains the only serial owner."""
+
+    def __init__(self):
+        self.thread = None
+        self.abort_event = threading.Event()
+        self.lock = threading.Lock()
+
+    @property
+    def running(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self, filename, plate=1):
+        filename = _clean_filename(filename)
+        plate = _coerce_int(plate, 1)
+        if not filename:
+            return False, "Filename is required."
+        with self.lock:
+            if self.running:
+                return False, "A routine is already running."
+            if trajectory is None:
+                return False, "Motion planner is unavailable."
+            conn = get_db()
+            try:
+                exists = conn.execute("SELECT 1 FROM routines WHERE filename = ?", (filename,)).fetchone()
+            finally:
+                conn.close()
+            if not exists:
+                return False, f"Routine '{filename}' was not found."
+
+            self.abort_event.clear()
+            routine_progress.update({
+                "running": True,
+                "aborted": False,
+                "error": None,
+                "done": False,
+                "filename": filename,
+                "wells_done": 0,
+                "wells_total": 0,
+                "current_well": None,
+            })
+            self.thread = threading.Thread(target=self.run, args=(filename, plate), daemon=True)
+            self.thread.start()
+        return True, f"Routine '{filename}' started."
+
+    def abort(self):
+        self.abort_event.set()
+        ok, reply = serial_link.abort()
+        routine_progress.update({
+            "running": False,
+            "aborted": True,
+            "error": None if ok else reply,
+        })
+        return ok, reply
+
+    def _load_wells(self, filename, plate):
+        conn = get_db()
+        try:
+            rows = conn.execute("""
+                SELECT wellId, delayBetweenStep, lightTime, exposureTime, layout
+                FROM well_data
+                WHERE filename = ?
+                  AND plateNumber = ?
+                  AND COALESCE(stepAmount, 0) != 0
+            """, (filename, plate)).fetchall()
+        finally:
+            conn.close()
+
+        wells = {}
+        layout = "96-well"
+        for row in rows:
+            layout = row["layout"] or layout
+            wells[row["wellId"]] = {
+                "delayBetweenStep": row["delayBetweenStep"],
+                "lightTime": row["lightTime"],
+                "exposureTime": row["exposureTime"],
+            }
+        return wells, layout
+
+    def run(self, filename, plate):
+        try:
+            wells, layout = self._load_wells(filename, plate)
+            if not wells:
+                raise RuntimeError(f"Routine '{filename}' has no active wells on plate {plate}.")
+
+            plan = trajectory.plan_routine(wells, layout=layout, plate_number=plate)
+            routine_progress.update({
+                "wells_total": plan.wells_total,
+                "wells_done": 0,
+                "current_well": None,
+                "running": True,
+            })
+
+            if not serial_link.connected:
+                ok, reply = serial_link.connect()
+                if not ok:
+                    raise RuntimeError(reply)
+
+            ok, reply = serial_link.command("E")
+            if not ok:
+                raise RuntimeError(reply)
+
+            wells_done = 0
+            for segment in plan.segments:
+                if self.abort_event.is_set():
+                    raise InterruptedError("Routine aborted.")
+
+                ok, reply = serial_link.command(
+                    f"M {segment.dx_steps} {segment.dy_steps} {segment.dz_steps}",
+                    expect_done=True,
+                )
+                if not ok:
+                    raise RuntimeError(reply)
+
+                self._capture(filename, segment)
+                wells_done += 1
+                routine_progress.update({
+                    "wells_done": wells_done,
+                    "wells_total": plan.wells_total,
+                    "current_well": segment.well_id,
+                })
+
+            serial_link.command("D")
+            routine_progress.update({
+                "running": False,
+                "done": True,
+                "aborted": False,
+                "error": None,
+                "current_well": None,
+            })
+        except InterruptedError as exc:
+            serial_link.abort()
+            serial_link.command("D")
+            routine_progress.update({
+                "running": False,
+                "aborted": True,
+                "done": False,
+                "error": str(exc),
+            })
+        except Exception as exc:
+            serial_link.abort()
+            serial_link.command("D")
+            routine_progress.update({
+                "running": False,
+                "aborted": False,
+                "done": False,
+                "error": str(exc),
+            })
+
+    def _capture(self, filename, segment):
+        if segment.delay_ms > 0:
+            time.sleep(segment.delay_ms / 1000.0)
+
+        if segment.light_ms > 0:
+            duration_s = segment.light_ms / 1000.0
+            subprocess.run(
+                [sys.executable, str(LIGHT_SCRIPT_PATH), "automate", str(duration_s)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=duration_s + 5,
+                cwd=BASE_DIR,
+            )
+
+        if segment.exposure_us > 0:
+            date_today = datetime.now().strftime("%Y-%m-%d")
+            output_path = PICTURES_DIR / filename / date_today / f"{segment.well_id}.jpg"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(CAMERA_SCRIPT_PATH),
+                    "--mode",
+                    "routine",
+                    "--exposure",
+                    str(segment.exposure_us),
+                    "--output-path",
+                    str(output_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+                cwd=BASE_DIR,
+            )
+
+
+routine_runner = RoutineRunner()
 
 
 # --------------------------------------------------------------------------
@@ -552,11 +753,17 @@ def get_logs():
 # --------------------------------------------------------------------------
 @app.route("/api/status", methods=["GET"])
 def api_status():
+    firmware = None
+    if serial_link.connected and not routine_runner.running:
+        ok, reply = serial_link.command("?")
+        firmware = reply if ok else None
     with serial_lock:
         return jsonify({
             "connected": serial_link.connected,
             "current_steps": serial_link.current_steps,
             "port": serial_link.port,
+            "routine_running": routine_runner.running,
+            "firmware": firmware,
         })
 
 
@@ -579,6 +786,8 @@ def api_disconnect():
 
 @app.route("/api/steps", methods=["POST"])
 def api_steps():
+    if routine_runner.running:
+        return jsonify({"message": "Routine is running; manual step changes are blocked."}), 409
     steps = _coerce_int((request.get_json() or {}).get("steps"))
     if steps <= 0:
         return jsonify({"message": "Error: Invalid steps value provided."}), 400
@@ -590,6 +799,8 @@ def api_steps():
 
 @app.route("/api/motor/<action>", methods=["POST"])
 def api_motor(action):
+    if routine_runner.running:
+        return jsonify({"message": "Routine is running; manual motor commands are blocked."}), 409
     command_map = {
         "x-forward": "X",
         "x-backward": "x",
@@ -749,6 +960,22 @@ def pictures_download():
 @app.route("/api/routine/progress", methods=["GET"])
 def routine_progress_route():
     return jsonify(routine_progress)
+
+
+@app.route("/api/routine/run", methods=["POST"])
+def routine_run():
+    data = request.get_json() or {}
+    ok, message = routine_runner.start(data.get("filename"), data.get("plate", 1))
+    return jsonify({"started": ok, "message": message}), 202 if ok else 409
+
+
+@app.route("/api/routine/abort", methods=["POST"])
+def routine_abort():
+    if not routine_runner.running:
+        routine_progress.update({"running": False, "aborted": False})
+        return jsonify({"aborted": False, "message": "No routine is running."})
+    ok, message = routine_runner.abort()
+    return jsonify({"aborted": ok, "message": message}), 200 if ok else 503
 
 
 @app.route("/api/motion/estimate", methods=["POST"])

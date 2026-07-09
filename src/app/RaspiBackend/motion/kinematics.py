@@ -109,6 +109,37 @@ def well_to_steps(plate_number: int, well_id: str, layout: str = "96-well") -> S
     return pos
 
 
+def position_from_well_id(well_id: str, layout: str = "96-well") -> tuple[int, int]:
+    """Return zero-based (row, col) for a well id."""
+    return _parse_well_id(well_id, layout)
+
+
+def well_id_from_position(row: int, col: int, layout: str = "96-well") -> str:
+    """Return a well id from zero-based row/col, validating layout bounds."""
+    rows, cols = _layout_dimensions(layout)
+    row = int(row)
+    col = int(col)
+    if row < 0 or row >= rows or col < 0 or col >= cols:
+        raise ValueError(f"Position ({row}, {col}) is outside a {layout} plate.")
+    return f"{chr(ord('A') + row)}{col + 1}"
+
+
+def well_to_relative_steps(
+    from_well: str,
+    to_well: str,
+    plate_number: int = 1,
+    layout: str = "96-well",
+) -> tuple[int, int, int]:
+    """Relative motor delta from one well center to another."""
+    start = well_to_steps(plate_number, from_well, layout)
+    end = well_to_steps(plate_number, to_well, layout)
+    return (
+        end.x_steps - start.x_steps,
+        end.y_steps - start.y_steps,
+        end.z_steps - start.z_steps,
+    )
+
+
 def steps_to_well(pos: StagePosition, layout: str = "96-well"):
     """Nearest (plate_number, well_id) for a stage position — for UI display
     and post-abort recovery. Return None if farther than pitch/2 from a center."""

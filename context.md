@@ -20,6 +20,15 @@ This repository controls a microscope motion and imaging setup over a local LAN.
 
 ---
 
+> **STATUS (2026-07-09): superseded.** The scaffolds below are implemented but not wired
+> into the live path (cron still runs legacy `routine.py`; `page.js` still mounts the old
+> RoutineBuilder). Current plan: `docs/plan-2026-07-09.md` — single-serial-owner
+> architecture, routine runner inside backend.py, abort/progress/Run-now UX, V2 mount,
+> styled-jsx → tokens migration, deletion list.
+> **Then amended by `docs/plan-v3-architecture.md`**: hub/agent split — FastAPI + Postgres +
+> Docker Compose on a LAN server; Pi Zero 2 reduced to a thin hardware agent (serial,
+> camera, GPIO); live camera preview with manual controls; indexed image search.
+
 # MASTER PLAN (2026-07-03) — scaffolded, to be completed
 
 Everything below is the implementation plan. Function scaffolds with `TODO(complete)` comments

@@ -30,6 +30,7 @@ class MoveSegment:
     well_id: object = None       # str or None; set when segment ends on a capture well
     light_ms: int = 0
     exposure_us: int = 0
+    delay_ms: int = 0
 
 
 @dataclass
@@ -123,6 +124,7 @@ def plan_routine(wells_data: dict, layout: str = "96-well",
             well_id=well_id,
             light_ms=light_ms,
             exposure_us=exposure_us,
+            delay_ms=delay_ms,
         ))
         plan.total_time_s += dynamics.time_for_xy_move(dx, dy)
         plan.total_time_s += dynamics.time_for_move("z", dz)

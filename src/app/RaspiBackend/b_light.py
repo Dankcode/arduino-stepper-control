@@ -31,6 +31,9 @@ def automated_pulse(duration):
     Turns the light on for a set duration, then off.
     duration: time in seconds
     """
+    duration = float(duration)
+    if duration <= 0 or duration > 60:
+        raise ValueError("Automated pulse duration must be > 0 and <= 60 seconds.")
     setup_gpio()
     try:
         GPIO.output(LIGHT_PIN, GPIO.HIGH)
@@ -56,6 +59,11 @@ if __name__ == "__main__":
         manual_control(False)
     elif cmd == "automate":
         if len(sys.argv) == 3:
-            automated_pulse(float(sys.argv[2]))
+            try:
+                automated_pulse(float(sys.argv[2]))
+            except ValueError as exc:
+                print(f"Error: {exc}")
+                sys.exit(1)
         else:
             print("Error: Automation requires a duration in seconds.")
+            sys.exit(1)
