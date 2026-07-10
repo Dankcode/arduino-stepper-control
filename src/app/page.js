@@ -258,6 +258,7 @@ export default function Home() {
           status={connectionStatus}
           url={PI_BACKEND_URL}
           routineRunning={backendStatus?.routine_running || routineProgress.running}
+          baud={backendStatus?.baud}
           checkedAt={lastCheckedAt ? `Checked ${lastCheckedAt.toLocaleTimeString()}` : null}
         />
         {(backendStatus?.routine_running || routineProgress.running) && (

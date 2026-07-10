@@ -10,7 +10,7 @@ const stateColor = {
   running: colors.info,
 };
 
-const ConnectionBadge = ({ status, url, routineRunning, checkedAt }) => {
+const ConnectionBadge = ({ status, url, routineRunning, checkedAt, baud }) => {
   const normalized = routineRunning
     ? 'running'
     : String(status || 'disconnected').toLowerCase().replace(/\.+$/, '');
@@ -39,6 +39,7 @@ const ConnectionBadge = ({ status, url, routineRunning, checkedAt }) => {
         boxShadow: normalized === 'connected' || normalized === 'running' ? `0 0 8px ${color}` : 'none',
       }} />
       <span className="connection-badge-label">{label}</span>
+      {Number(baud) > 0 ? <span className="connection-badge-baud" style={{ color: colors.info, fontFamily: font.mono }}>{baud} baud</span> : null}
       {url ? <span className="connection-badge-url" style={{ color: colors.textLo, fontFamily: font.mono }}>{url}</span> : null}
       {checkedAt ? <span className="connection-badge-checked" style={{ color: colors.textLo, fontFamily: font.mono }}>{checkedAt}</span> : null}
     </div>

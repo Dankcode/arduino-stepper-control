@@ -35,6 +35,7 @@ const DEFAULT_WELL = {
   exposureTime: 0,
   switchPlate: false,
 };
+const WELL_ID_PATTERN = /^([A-Z])([1-9]\d*)$/;
 
 const createDefaultFilename = () => {
   const now = new Date();
@@ -76,7 +77,10 @@ const initialState = {
 
 const selectionKey = (row, col) => `${row},${col}`;
 const parseSelectionKey = (key) => key.split(',').map(Number);
-const sanitizeFilename = (value) => value.replace(/[^a-zA-Z0-9-_.]/g, '');
+const sanitizeFilename = (value) => String(value || '')
+  .trim()
+  .replace(/(?:\.(?:json|sql))+$/i, '')
+  .replace(/[^a-zA-Z0-9-_.]/g, '');
 
 function reducer(state, action) {
   switch (action.type) {
@@ -160,15 +164,49 @@ const flattenPlates = (plates) => {
   return rows;
 };
 
+const importedSchedule = (payload) => {
+  const nested = payload?.schedule && typeof payload.schedule === 'object'
+    ? payload.schedule
+    : {};
+  const source = { ...payload, ...nested };
+  const schedule = {};
+  const repeatCount = Number(source.repeatCount);
+  if (Number.isFinite(repeatCount) && repeatCount > 0) schedule.repeatCount = repeatCount;
+  if (typeof source.startTime === 'string' && source.startTime) schedule.startTime = source.startTime;
+  if (typeof source.repeatInterval === 'string' && source.repeatInterval) {
+    schedule.repeatInterval = source.repeatInterval;
+  }
+  return schedule;
+};
+
+const routinePayload = (state) => {
+  const schedule = {
+    repeatCount: Math.max(1, Number(state.schedule.repeatCount) || 1),
+    startTime: state.schedule.startTime,
+    repeatInterval: state.schedule.repeatInterval,
+  };
+  return {
+    filename: state.filename,
+    well_data: flattenPlates(state.plates),
+    schedule,
+    // Flat fields keep exported routines compatible with the existing uploader.
+    ...schedule,
+  };
+};
+
 const hydrateImport = (payload) => {
   const plates = { topLeft: null, topRight: null, bottomLeft: null, bottomRight: null };
   const plateToQuadrant = { 1: 'topLeft', 2: 'topRight', 3: 'bottomLeft', 4: 'bottomRight' };
   (payload.well_data || []).forEach((item) => {
+    if (!item || typeof item !== 'object') return;
     const quadrant = plateToQuadrant[item.plateNumber] || 'topLeft';
-    const layout = item.layout || '96-well';
+    const layout = item.layout === '48-well' ? '48-well' : '96-well';
+    const wellId = String(item.wellId || '').trim().toUpperCase();
+    const match = WELL_ID_PATTERN.exec(wellId);
+    if (!match) return;
     if (!plates[quadrant]) plates[quadrant] = createPlate(layout);
-    const row = item.wellId.charAt(0).toUpperCase().charCodeAt(0) - 65;
-    const col = Number(item.wellId.slice(1)) - 1;
+    const row = match[1].charCodeAt(0) - 65;
+    const col = Number(match[2]) - 1;
     if (plates[quadrant].wells[row]?.[col]) {
       plates[quadrant].wells[row][col] = {
         stepAmount: Number(item.stepAmount) || 0,
@@ -637,13 +675,7 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
       const response = await fetch(`${PI_BACKEND_URL}/save_routine_sql`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: state.filename,
-          well_data: flattenPlates(state.plates),
-          repeatCount: Number(state.schedule.repeatCount) || 1,
-          startTime: state.schedule.startTime,
-          repeatInterval: state.schedule.repeatInterval,
-        }),
+        body: JSON.stringify(routinePayload(state)),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || `Backend rejected the save (HTTP ${response.status}).`);
@@ -663,13 +695,7 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
   // Export the routine as a portable JSON file in the same format the Import
   // button (and the old RoutineBuilder) accepts: { filename, well_data: [...] }.
   const handleExport = useCallback(() => {
-    const payload = {
-      filename: state.filename || 'routine',
-      well_data: flattenPlates(state.plates),
-      startTime: state.schedule.startTime,
-      repeatInterval: state.schedule.repeatInterval,
-      repeatCount: Number(state.schedule.repeatCount) || 1,
-    };
+    const payload = { ...routinePayload(state), filename: state.filename || 'routine' };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -689,11 +715,14 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
     reader.onload = () => {
       try {
         const payload = JSON.parse(reader.result);
+        if (!payload || !Array.isArray(payload.well_data) || payload.well_data.length === 0) {
+          throw new Error('This file does not contain any routine well data.');
+        }
         dispatch({
           type: 'IMPORT_JSON',
           plates: hydrateImport(payload),
-          filename: sanitizeFilename(payload.filename || file.name.replace(/\.json$/i, '')),
-          schedule: payload.schedule,
+          filename: sanitizeFilename(payload.filename || file.name),
+          schedule: importedSchedule(payload),
         });
         toast.success('Routine imported.');
       } catch (error) {
@@ -714,13 +743,7 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
       const saveResponse = await fetch(`${PI_BACKEND_URL}/save_routine_sql`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: state.filename,
-          well_data: flattenPlates(state.plates),
-          repeatCount: Number(state.schedule.repeatCount) || 1,
-          startTime: state.schedule.startTime,
-          repeatInterval: state.schedule.repeatInterval,
-        }),
+        body: JSON.stringify(routinePayload(state)),
       });
       const saveData = await saveResponse.json().catch(() => ({}));
       if (!saveResponse.ok) throw new Error(saveData.error || 'Save before run failed.');

@@ -59,6 +59,11 @@ cd /home/dank/backend
 python3 backend
 ```
 
+The deployed legacy V1 firmware uses 9600 baud; V2 uses 115200. The backend defaults
+to 9600 and validates the serial handshake, then automatically probes the other rate if
+needed. Set `STEPPER_BAUD_RATE` in `/home/dank/stepper-agent.env` to make the first
+connection attempt use the expected rate.
+
 ## Routine Storage
 
 `POST /save_routine_sql` is a legacy route name. It saves routines as rows in the

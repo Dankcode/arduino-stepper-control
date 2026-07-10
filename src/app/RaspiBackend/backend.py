@@ -166,7 +166,28 @@ def _coerce_int(value, default=0):
 def _clean_filename(filename):
     if not filename:
         return ""
-    return Path(str(filename).replace(".sql", "")).name.strip()
+    name = Path(str(filename)).name.strip()
+    # Routine files are portable JSON, while the legacy UI still labels rows
+    # with .sql. Store one canonical extension-free name in SQLite.
+    while name.lower().endswith((".json", ".sql")):
+        name = name.rsplit(".", 1)[0]
+    return name.strip()
+
+
+def _schedule_from_payload(data):
+    """Accept both the portable nested schedule and the legacy flat fields."""
+    schedule = data.get("schedule")
+    if not isinstance(schedule, dict):
+        schedule = {}
+
+    def value(key, default=None):
+        return data[key] if key in data else schedule.get(key, default)
+
+    return (
+        value("startTime"),
+        value("repeatInterval", "daily") or "daily",
+        value("repeatCount", 1) or 1,
+    )
 
 
 def _valid_time(value):
@@ -343,15 +364,68 @@ class SerialLink:
                 f"Serial port '{self.configured_port}' was not found. "
                 f"Detected ports: {detail}. Set STEPPER_SERIAL_PORT to the Arduino device path."
             )
-        self.conn = serial.Serial(self.port, self.baud, timeout=SERIAL_TIMEOUT, write_timeout=SERIAL_TIMEOUT)
-        time.sleep(2)
-        self.conn.reset_input_buffer()
-        self.conn.reset_output_buffer()
-        ok, reply = self.command("?")
-        if not ok:
+        # Try the configured baud rate first, then the other common one.
+        # Firmware v1 runs at 9600, firmware v2 at 115200; a mismatch reads as
+        # null bytes / garbage, so validate the handshake reply before trusting
+        # the connection.
+        candidates = [self.baud] + [b for b in (9600, 115200) if b != self.baud]
+        attempts = []
+        for baud in candidates:
+            try:
+                self.conn = serial.Serial(self.port, baud, timeout=SERIAL_TIMEOUT, write_timeout=SERIAL_TIMEOUT)
+            except Exception as exc:
+                return False, f"Could not open {self.port}: {exc}"
+            time.sleep(2)
+            self.conn.reset_input_buffer()
+            self.conn.reset_output_buffer()
+            ok, reply = self.command("?")
+            if ok and self._valid_reply(reply):
+                self.baud = baud
+                note = "" if baud == candidates[0] else f" (auto-detected baud {baud})"
+                return True, f"Connected to {self.port} @ {baud}{note}: {reply}"
+            attempts.append(f"{baud}: {reply!r}")
             self.disconnect()
-            return False, f"Connected to {self.port}, but handshake failed: {reply}"
-        return True, f"Connected to {self.port}: {reply}"
+        # Legacy fallback (previous-build behavior): the old backend never
+        # required a handshake — it opened the port and trusted it. Some
+        # boards reset slowly on open and miss the '?', so connect anyway at
+        # the configured baud and let commands speak for themselves.
+        try:
+            self.baud = candidates[0]
+            self.conn = serial.Serial(self.port, self.baud, timeout=SERIAL_TIMEOUT, write_timeout=SERIAL_TIMEOUT)
+            time.sleep(2)
+            self.conn.reset_input_buffer()
+            self.conn.reset_output_buffer()
+            return True, (
+                f"Connected to {self.port} @ {self.baud} (legacy mode - no handshake reply; "
+                f"probed {'; '.join(attempts)})"
+            )
+        except Exception as exc:
+            return False, f"Could not open {self.port}: {exc}"
+
+    @staticmethod
+    def _valid_reply(reply):
+        """A real firmware reply starts with OK: or POS; garbage (e.g. from a
+        baud mismatch) does not."""
+        return isinstance(reply, str) and (reply.startswith("OK:") or reply.startswith("POS"))
+
+    def fire(self, command):
+        """Previous-build semantics for manual motor control: write the
+        command, wait briefly, return whatever the firmware said (or a plain
+        acknowledgment if it is still moving). Never blocks on OK:done and
+        never fails on silence - matching the old stepperbotBackend.py."""
+        if not self.connected:
+            return False, "Arduino is not connected."
+        try:
+            with self._write_lock:
+                self.conn.write(f"{command}\n".encode("ascii"))
+            time.sleep(0.1)
+            reply = self._readline()
+            if reply.startswith("ERR:"):
+                return False, reply
+            return True, reply or f"Command '{command}' sent."
+        except Exception as exc:
+            self.disconnect()
+            return False, f"Serial communication error: {exc}"
 
     def disconnect(self):
         if self.conn is not None:
@@ -362,7 +436,10 @@ class SerialLink:
     def _readline(self):
         if not self.connected:
             return ""
-        return self.conn.readline().decode("utf-8", errors="replace").strip()
+        raw = self.conn.readline().decode("utf-8", errors="replace")
+        # Null bytes appear when the baud rate is mismatched or the line is
+        # noisy; strip them so they never masquerade as a real reply.
+        return raw.replace("\x00", "").replace("\ufffd", "").strip()
 
     def command(self, command, expect_done=False):
         if not self.connected:
@@ -638,7 +715,7 @@ routine_runner = RoutineRunner()
 # --------------------------------------------------------------------------
 # Bump when routes change so a stale Pi deploy is obvious from the browser:
 # open <backend-url>/ and compare against this file.
-BACKEND_VERSION = "2026-07-10.3"
+BACKEND_VERSION = "2026-07-10.6"
 
 
 @app.route("/", methods=["GET"])
@@ -651,11 +728,16 @@ def health():
 # --------------------------------------------------------------------------
 @app.route("/save_routine_sql", methods=["POST"])
 def save_routine_sql():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Routine payload must be a JSON object."}), 400
     filename = _clean_filename(data.get("filename"))
-    wells = data.get("well_data") or []
-    if not filename or not wells:
-        return jsonify({"error": "Filename or well data missing."}), 400
+    wells = data.get("well_data")
+    if not filename:
+        return jsonify({"error": "Filename is required."}), 400
+    if not isinstance(wells, list) or not wells:
+        return jsonify({"error": "well_data must be a non-empty array."}), 400
+    start_time, repeat_interval, repeat_count = _schedule_from_payload(data)
 
     conn = get_db()
     try:
@@ -666,6 +748,11 @@ def save_routine_sql():
         conn.execute("INSERT OR IGNORE INTO routines (filename) VALUES (?)", (filename,))
         conn.execute("DELETE FROM well_data WHERE filename = ?", (filename,))
         for item in wells:
+            if not isinstance(item, dict):
+                raise ValueError("Each well_data entry must be an object.")
+            well_id = str(item.get("wellId", "")).strip().upper()
+            if not well_id:
+                raise ValueError("Each well_data entry requires a wellId.")
             conn.execute("""
                 INSERT INTO well_data (
                     filename, plateNumber, wellId, stepAmount, delayBetweenStep,
@@ -674,7 +761,7 @@ def save_routine_sql():
             """, (
                 filename,
                 _coerce_int(item.get("plateNumber"), 1),
-                str(item.get("wellId", "")).upper(),
+                well_id,
                 _coerce_int(item.get("stepAmount")),
                 _coerce_int(item.get("delayBetweenStep")),
                 _coerce_int(item.get("lightTime")),
@@ -682,13 +769,13 @@ def save_routine_sql():
                 1 if item.get("switchPlate") in {1, True, "1", "true", "on"} else 0,
                 item.get("layout") or "96-well",
             ))
-        if data.get("startTime"):
+        if start_time:
             _replace_schedule(
                 conn,
                 filename,
-                data.get("startTime"),
-                data.get("repeatInterval") or "daily",
-                data.get("repeatCount") or 1,
+                start_time,
+                repeat_interval,
+                repeat_count,
             )
         saved_well_count = conn.execute(
             "SELECT COUNT(*) FROM well_data WHERE filename = ?", (filename,)
@@ -927,6 +1014,7 @@ def api_status():
             "current_steps": serial_link.current_steps,
             "port": serial_link.port,
             "configured_port": serial_link.configured_port,
+            "baud": serial_link.baud,
             "available_ports": serial_link.available_ports(),
             "routine_running": routine_runner.running,
             "firmware": firmware,
@@ -942,7 +1030,13 @@ def api_connect():
             ok, message = serial_link.connect()
         except Exception as exc:
             ok, message = False, str(exc)
-        return jsonify({"success": ok, "message": message, "connected": ok, "port": serial_link.port}), 200 if ok else 500
+        return jsonify({
+            "success": ok,
+            "message": message,
+            "connected": ok,
+            "port": serial_link.port,
+            "baud": serial_link.baud if ok else None,
+        }), 200 if ok else 500
 
 
 @app.route("/api/disconnect", methods=["POST"])
@@ -963,7 +1057,7 @@ def api_steps():
         return jsonify({"message": "Error: Invalid steps value provided."}), 400
     with serial_lock:
         serial_link.current_steps = steps
-        ok, reply = serial_link.command(f"S{steps}")
+        ok, reply = serial_link.fire(f"S{steps}")
     return jsonify({"message": reply if ok else f"Error: {reply}"}), 200 if ok else 503
 
 
@@ -984,7 +1078,9 @@ def api_motor(action):
     if not command:
         return jsonify({"message": f'Error: Unknown command "{action}"'}), 404
     with serial_lock:
-        ok, reply = serial_link.command(command, expect_done=command in {"X", "x", "A", "a"})
+        # Previous-build behavior: manual moves are fire-and-forget. Do not
+        # wait for a completion line - the firmware moves while we return.
+        ok, reply = serial_link.fire(command)
     return jsonify({"message": reply if ok else f"Error: {reply}"}), 200 if ok else 503
 
 
