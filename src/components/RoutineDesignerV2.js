@@ -9,7 +9,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { Check, ChevronLeft, ChevronRight, Download, Play, Save, Upload } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Download, HelpCircle, Play, Save, Upload } from 'lucide-react';
 import ProgressBar from './ui/ProgressBar';
 import { useToast } from './ui/StatusToast';
 import { colors, font, radii, shadows, motion } from './ui/tokens';
@@ -23,10 +23,10 @@ const QUADRANT_LABELS = {
 };
 const QUADRANT_PLATE_NUMBER = { topLeft: 1, topRight: 2, bottomLeft: 3, bottomRight: 4 };
 const PARAMS = [
-  ['stepAmount', 'Steps', 'steps'],
-  ['delayBetweenStep', 'Delay', 'ms'],
-  ['lightTime', 'Light', 'ms'],
-  ['exposureTime', 'Exposure', 'us'],
+  ['stepAmount', 'Steps', 'steps', 'Motor steps to move when travelling to this well. 0 = skip this well entirely.'],
+  ['delayBetweenStep', 'Delay', 'ms', 'Pause after arriving at the well, before the light and camera fire.'],
+  ['lightTime', 'Light', 'ms', 'How long the blue excitation light stays on at this well. 0 = no light.'],
+  ['exposureTime', 'Exposure', 'us', 'Camera sensor exposure for the capture at this well. 50,000 us = 1/20 s.'],
 ];
 const DEFAULT_WELL = {
   stepAmount: 0,
@@ -285,7 +285,7 @@ const formatSeconds = (value) => {
   return `${seconds}s`;
 };
 
-const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, running, onSave, onRun, onImport, onExport }) {
+const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, running, onSave, onRun, onImport, onExport, onToggleHelp, helpOpen }) {
   return (
     <div className="routine-designer-toolbar" style={styles.toolbar}>
       <input
@@ -294,20 +294,39 @@ const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, runnin
         onChange={(event) => dispatch({ type: 'SET_FILENAME', filename: event.target.value })}
         placeholder="routine-name"
         style={styles.filenameInput}
+        title="Name of this routine. Used as the file name when saving, exporting, and scheduling."
       />
-      <button type="button" onClick={onSave} disabled={saving || !state.filename} style={styles.primaryButton}>
+      <button
+        type="button"
+        onClick={onSave}
+        disabled={saving || !state.filename}
+        style={styles.primaryButton}
+        title="Save this routine to the backend database. Overwrites a routine with the same name."
+      >
         {saving ? <ProgressBar size="sm" /> : <><Save size={16} /> Save</>}
       </button>
-      <button type="button" onClick={onRun} disabled={running || !state.filename} style={styles.secondaryButton}>
+      <button
+        type="button"
+        onClick={onRun}
+        disabled={running || !state.filename}
+        style={styles.secondaryButton}
+        title="Save, then start this routine on the microscope right now. Progress appears in the header."
+      >
         <Play size={16} />
         {running ? 'Starting...' : 'Run now'}
       </button>
-      <label style={styles.secondaryButton}>
+      <label style={styles.secondaryButton} title="Load a routine from a .json file exported earlier (replaces the current plate setup).">
         <Upload size={16} />
         Import
         <input type="file" accept="application/json,.json" onChange={onImport} style={{ display: 'none' }} />
       </label>
-      <button type="button" onClick={onExport} disabled={!state.filename} style={styles.secondaryButton}>
+      <button
+        type="button"
+        onClick={onExport}
+        disabled={!state.filename}
+        style={styles.secondaryButton}
+        title="Download this routine as a portable .json file you can back up or import on another machine."
+      >
         <Download size={16} />
         Export
       </button>
@@ -315,6 +334,7 @@ const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, runnin
         value={state.schedule.repeatInterval}
         onChange={(event) => dispatch({ type: 'SET_SCHEDULE', schedule: { repeatInterval: event.target.value } })}
         style={styles.select}
+        title="How often the scheduler runs this routine once it is moved to Active: once, every day, or every hour."
       >
         <option value="once">Once</option>
         <option value="daily">Daily</option>
@@ -325,10 +345,51 @@ const Toolbar = memo(function Toolbar({ state, dispatch, runtime, saving, runnin
         value={state.schedule.startTime}
         onChange={(event) => dispatch({ type: 'SET_SCHEDULE', schedule: { startTime: event.target.value } })}
         style={styles.timeInput}
+        title="Time of day the scheduled run starts (24-hour clock)."
       />
-      <div className="routine-designer-runtime" style={styles.runtimeChip}>
+      <div
+        className="routine-designer-runtime"
+        style={styles.runtimeChip}
+        title="Estimated total duration of one run: stage travel + delays + light + exposure for every active well."
+      >
         {runtime.loading ? 'Estimating...' : `Runtime ${formatSeconds(runtime.seconds)}`}
       </div>
+      <button
+        type="button"
+        onClick={onToggleHelp}
+        style={helpOpen ? { ...styles.secondaryButton, borderColor: colors.accent, color: colors.accent } : styles.secondaryButton}
+        title="Show or hide the quick guide to this screen"
+      >
+        <HelpCircle size={16} />
+        Help
+      </button>
+    </div>
+  );
+});
+
+const HelpPanel = memo(function HelpPanel({ onClose }) {
+  const rows = [
+    ['Select wells', 'Click a well to select it. Drag for a range, Shift+click extends, Ctrl/Cmd+click adds or removes single wells. Click a selected well again to deselect.'],
+    ['Edit settings', 'With wells selected, type values in the inspector on the right. The plate colors update live for the highlighted parameter.'],
+    ['Heatmap', 'The colored buttons above the inputs choose which parameter the plate colors represent. Darker = higher value.'],
+    ['Skip a well', 'A well with Steps = 0 is skipped: the stage never visits it.'],
+    ['Copy / paste', 'Ctrl/Cmd+C copies the selected block of wells; Ctrl/Cmd+V pastes it starting at the current selection.'],
+    ['Save vs Run now', 'Save stores the routine on the backend. Run now saves and immediately executes it on the microscope.'],
+    ['Schedule', 'The interval and time apply when the routine is activated in Saved Routines - the scheduler then runs it automatically.'],
+    ['Import / Export', 'Export downloads this routine as a .json file. Import loads such a file, including ones downloaded from Saved Routines.'],
+  ];
+  return (
+    <div style={styles.helpPanel} role="dialog" aria-label="Routine designer guide">
+      <div style={styles.helpHeader}>
+        <strong>How to use the Routine Designer</strong>
+        <button type="button" onClick={onClose} style={styles.helpClose} title="Close the guide">&#10005;</button>
+      </div>
+      {rows.map(([term, explanation]) => (
+        <div key={term} style={styles.helpRow}>
+          <span style={styles.helpTerm}>{term}</span>
+          <span style={styles.helpText}>{explanation}</span>
+        </div>
+      ))}
     </div>
   );
 });
@@ -562,26 +623,77 @@ const Inspector = memo(function Inspector({ state, values, dispatch }) {
   const count = state.selection?.cells.size || 0;
   const selectionLabel = count > 0 ? `${count} well${count === 1 ? '' : 's'} selected` : 'No wells selected';
 
+  // Per-well readout: identify exactly which wells are selected, and for a
+  // single selection show that specific well's stored settings.
+  const selectedWellIds = state.selection
+    ? Array.from(state.selection.cells).map((key) => {
+        const [row, col] = parseSelectionKey(key);
+        return `${String.fromCharCode(65 + row)}${col + 1}`;
+      }).sort()
+    : [];
+  const singleWell = count === 1 && state.plates[state.selection.quadrant]
+    ? (() => {
+        const [row, col] = parseSelectionKey(state.selection.cells.values().next().value);
+        return { id: `${String.fromCharCode(65 + row)}${col + 1}`, data: state.plates[state.selection.quadrant].wells[row][col] };
+      })()
+    : null;
+
   return (
     <aside className="routine-designer-inspector" style={styles.inspector}>
-      <button type="button" onClick={() => dispatch({ type: 'TOGGLE_INSPECTOR' })} style={styles.collapseButton}>
+      <button
+        type="button"
+        onClick={() => dispatch({ type: 'TOGGLE_INSPECTOR' })}
+        style={styles.collapseButton}
+        title="Collapse the settings panel"
+      >
         <ChevronRight size={16} />
       </button>
       <h2 style={styles.inspectorTitle}>{selectionLabel}</h2>
-      <div style={styles.segmented}>
-        {PARAMS.map(([param, label]) => (
+      {count > 0 && (
+        <p style={styles.selectionDetail} title={selectedWellIds.join(', ')}>
+          {QUADRANT_LABELS[state.selection.quadrant]} &middot;{' '}
+          {selectedWellIds.slice(0, 10).join(', ')}{selectedWellIds.length > 10 ? ` +${selectedWellIds.length - 10} more` : ''}
+        </p>
+      )}
+      {count === 0 && (
+        <p style={styles.selectionDetail}>
+          Click a well on the plate to view and edit its settings. Drag to select a range.
+        </p>
+      )}
+      {singleWell && (
+        <div style={styles.wellReadout} title={`Exact stored settings for well ${singleWell.id}`}>
+          <div style={styles.wellReadoutTitle}>Well {singleWell.id} settings</div>
+          {PARAMS.map(([param, label, unit]) => (
+            <div key={param} style={styles.wellReadoutRow}>
+              <span>{label}</span>
+              <span style={styles.wellReadoutValue}>
+                {Number(singleWell.data[param]) || 0} {unit}
+              </span>
+            </div>
+          ))}
+          <div style={styles.wellReadoutRow}>
+            <span>Visited</span>
+            <span style={styles.wellReadoutValue}>
+              {(Number(singleWell.data.stepAmount) || 0) > 0 ? 'Yes' : 'No (Steps = 0)'}
+            </span>
+          </div>
+        </div>
+      )}
+      <div style={styles.segmented} title="Choose which setting the plate colors represent">
+        {PARAMS.map(([param, label, , description]) => (
           <button
             key={param}
             type="button"
             onClick={() => dispatch({ type: 'SET_ACTIVE_PARAM', param })}
             style={state.activeParam === param ? styles.segmentActive : styles.segment}
+            title={`Color the plate by ${label}. ${description}`}
           >
             {label}
           </button>
         ))}
       </div>
-      {PARAMS.map(([param, label, unit]) => (
-        <label key={param} style={styles.field}>
+      {PARAMS.map(([param, label, unit, description]) => (
+        <label key={param} style={styles.field} title={description}>
           <span>{label}</span>
           <div style={styles.numberWrap}>
             <input
@@ -589,15 +701,21 @@ const Inspector = memo(function Inspector({ state, values, dispatch }) {
               min="0"
               disabled={!count}
               value={values[param] === 'mixed' || values[param] === undefined ? '' : values[param]}
-              placeholder={values[param] === 'mixed' ? '-' : '0'}
+              placeholder={values[param] === 'mixed' ? 'mixed' : '0'}
               onChange={(event) => dispatch({ type: 'APPLY_PARAM', param, value: event.target.value })}
               style={styles.numberInput}
+              title={values[param] === 'mixed'
+                ? `Selected wells have different ${label.toLowerCase()} values. Typing here sets them all.`
+                : description}
             />
             <span style={styles.unit}>{unit}</span>
           </div>
         </label>
       ))}
-      <label style={styles.toggleRow}>
+      <label
+        style={styles.toggleRow}
+        title="After imaging this well, the routine pauses so you can swap plates before it continues."
+      >
         <input
           type="checkbox"
           disabled={!count}
@@ -632,6 +750,7 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const clipboardRef = useRef(null);
   const toast = useToast();
   const runtime = useRuntimeEstimate(PI_BACKEND_URL, state.plates);
@@ -777,7 +896,10 @@ const RoutineDesignerV2 = ({ PI_BACKEND_URL, editRequest }) => {
         onRun={handleRun}
         onImport={handleImport}
         onExport={handleExport}
+        onToggleHelp={() => setHelpOpen((open) => !open)}
+        helpOpen={helpOpen}
       />
+      {helpOpen && <HelpPanel onClose={() => setHelpOpen(false)} />}
       <main className="routine-designer-main" style={styles.main}>
         <PlateCanvas state={state} dispatch={dispatch} clipboardRef={clipboardRef} />
         <Inspector state={state} values={values} dispatch={dispatch} />
@@ -845,6 +967,78 @@ const styles = {
     background: colors.bg,
     color: colors.textHi,
     fontFamily: font.sans,
+    position: 'relative',
+  },
+  helpPanel: {
+    position: 'absolute',
+    top: 52,
+    right: 12,
+    zIndex: 60,
+    width: 'min(430px, calc(100vw - 2rem))',
+    maxHeight: '70vh',
+    overflowY: 'auto',
+    background: colors.surface2,
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.md,
+    boxShadow: shadows.card,
+    padding: '12px 14px',
+  },
+  helpHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    fontSize: 13,
+  },
+  helpClose: {
+    background: 'none',
+    border: 'none',
+    color: colors.textMid,
+    cursor: 'pointer',
+    fontSize: 14,
+  },
+  helpRow: {
+    display: 'grid',
+    gridTemplateColumns: '110px 1fr',
+    gap: 8,
+    padding: '5px 0',
+    borderTop: `1px solid ${colors.border}`,
+    fontSize: 12,
+  },
+  helpTerm: { color: colors.accent, fontWeight: 700 },
+  helpText: { color: colors.textMid, lineHeight: 1.45 },
+  selectionDetail: {
+    fontSize: 11,
+    color: colors.textMid,
+    margin: '0 0 10px',
+    lineHeight: 1.4,
+  },
+  wellReadout: {
+    background: colors.surface1,
+    border: `1px solid ${colors.border}`,
+    borderRadius: radii.sm,
+    padding: '8px 10px',
+    marginBottom: 12,
+  },
+  wellReadoutTitle: {
+    fontSize: 11,
+    fontWeight: 800,
+    letterSpacing: '0.06em',
+    textTransform: 'uppercase',
+    color: colors.textMid,
+    marginBottom: 6,
+  },
+  wellReadoutRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: 12,
+    padding: '2px 0',
+    color: colors.textMid,
+  },
+  wellReadoutValue: {
+    color: colors.textHi,
+    fontFamily: font.mono,
+    fontSize: 12,
   },
   toolbar: {
     display: 'flex',

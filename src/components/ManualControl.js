@@ -40,14 +40,12 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
   }, [API_BASE]);
 
   useEffect(() => {
-    // Load persisted step count from localStorage
     const saved = localStorage.getItem('cnc_default_steps');
     const savedSteps = Number.parseInt(saved, 10);
     if (Number.isFinite(savedSteps) && savedSteps > 0) setSteps(savedSteps);
     checkStatus();
   }, [checkStatus]);
 
-  // --- NEW FUNCTION: Manual Blue Light Control ---
   const handleBlueLightToggle = async (targetState) => {
     setPendingAction('light');
     try {
@@ -56,7 +54,6 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ state: targetState }),
       });
-
       const data = await response.json();
       if (data.success) {
         setBlueLightOn(targetState === 'on');
@@ -74,7 +71,6 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
     }
   };
 
-  // --- API Functions (Existing) ---
   const handleConnect = async () => {
     setPendingAction('connect');
     try {
@@ -120,7 +116,6 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
       toast.error('Step amount must be a positive integer');
       return;
     }
-
     setPendingAction('steps');
     try {
       const response = await fetch(`${API_BASE}/steps`, {
@@ -130,7 +125,6 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
       });
       const data = await response.json();
       setMessage(data.message);
-      // Persist the step count so it survives page reloads
       if (response.ok) {
         setSteps(parsedSteps);
         localStorage.setItem('cnc_default_steps', String(parsedSteps));
@@ -163,7 +157,6 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
     }
   };
 
-  // --- Well Navigation Test: A1 to A2 to B1 to Home ---
   const handleWellTest = async () => {
     if (!connected) { setMessage('Arduino not connected'); return; }
     setPendingAction('well-test');
@@ -177,11 +170,8 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
     };
 
     try {
-      // A1 to A2: move X forward
       await step('A1 to A2 (X Forward)', 'x-forward');
-      // A2 to B1: move ZY forward
       await step('A2 to B1 (ZY Forward)', 'zy-forward');
-      // B1 to A1: reverse ZY then reverse X (return home)
       await step('B1 to A2 (ZY Backward)', 'zy-backward');
       await step('A2 to A1 (X Backward)', 'x-backward');
       setWellTestProgress('Well test complete - returned to home (A1)');
@@ -195,7 +185,6 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
     }
   };
 
-  // Silent variant used internally by handleWellTest (no loading state toggle)
   const sendMotorCommandSilent = async (endpoint) => {
     const response = await fetch(`${API_BASE}/motor/${endpoint}`, { method: 'POST' });
     const data = await response.json();
@@ -228,200 +217,332 @@ const StepperMotorControl = ({ PI_BACKEND_URL }) => {
     }
   };
 
+  const jogDisabled = motionBusy || !connected;
+
   return (
-    <div className="container">
+    <div className="mc-page">
       <style jsx global>{`
-        .container { 
-          display: flex; 
-          flex-direction: column; 
-          align-items: center; 
-          padding: 2rem; 
-          box-sizing: border-box;
+        .mc-page {
+          display: flex;
+          justify-content: center;
+          padding: 1.5rem;
           overflow-y: auto;
           flex-grow: 1;
+          box-sizing: border-box;
         }
-        .card { 
-          background-color: #1e293b; 
-          padding: 1.5rem; 
-          border-radius: 1rem; 
-          box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); 
-          width: 100%; 
-          max-width: 32rem; 
-          border: 1px solid #334155; 
+        .mc-grid {
+          display: grid;
+          grid-template-columns: minmax(320px, 1.2fr) minmax(280px, 1fr);
+          gap: 1rem;
+          width: 100%;
+          max-width: 62rem;
+          align-content: start;
         }
-        .title { 
-          font-size: 1.5rem; 
-          font-weight: 800; 
-          text-align: center; 
-          color: #f8fafc; 
-          margin-bottom: 1.5rem;
-          text-transform: uppercase;
-          letter-spacing: 0.1em;
-        }
-        .message-display { 
-          padding: 0.75rem; 
-          border-radius: 0.5rem; 
-          background-color: #0f172a; 
-          border: 1px solid #1e293b; 
-          margin-top: 1rem; 
-          margin-bottom: 1rem; 
-        }
-        .message-text { 
-          font-size: 0.8rem; 
-          color: #94a3b8; 
-          font-family: 'JetBrains Mono', monospace;
-          margin: 0;
-        }
-        .status-block, .input-section { 
-          margin-bottom: 1rem; 
-          padding: 1rem; 
-          border-radius: 0.5rem; 
-          background-color: #0f172a;
+        @media (max-width: 900px) { .mc-grid { grid-template-columns: 1fr; } }
+        .mc-card {
+          background-color: #1e293b;
           border: 1px solid #334155;
+          border-radius: 0.75rem;
+          padding: 1.1rem 1.25rem;
         }
-        .status-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
-        .status-label { font-size: 0.7rem; font-weight: 700; color: #64748b; text-transform: uppercase; }
-        .status-indicator { padding: 0.2rem 0.6rem; border-radius: 0.25rem; font-size: 0.65rem; font-weight: 800; text-transform: uppercase; }
-        .status-indicator.connected { background-color: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid #10b981; }
-        .status-indicator.disconnected { background-color: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid #ef4444; }
-        .flex-buttons-group { display: flex; gap: 0.5rem; }
-        .btn { 
-          padding: 0.6rem 1rem; 
-          font-weight: 700; 
-          border-radius: 0.375rem; 
-          cursor: pointer; 
-          border: none; 
-          flex: 1; 
+        .mc-card-title {
+          font-size: 0.72rem;
+          font-weight: 800;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: #94a3b8;
+          margin: 0 0 0.35rem;
+        }
+        .mc-card-hint { font-size: 0.75rem; color: #64748b; margin: 0 0 0.9rem; line-height: 1.4; }
+        .mc-row { display: flex; gap: 0.5rem; align-items: center; }
+        .mc-btn {
+          padding: 0.6rem 1rem;
+          font-weight: 700;
+          border-radius: 0.4rem;
+          cursor: pointer;
+          border: 1px solid #475569;
+          background: #334155;
+          color: #f8fafc;
           font-size: 0.75rem;
           text-transform: uppercase;
-          transition: all 0.2s;
+          transition: all 0.15s;
+          flex: 1;
         }
-        .btn-connect { background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; }
-        .btn-disconnect { background: #334155; color: #94a3b8; }
-        .btn-connect:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3); }
-
-        .input-label { display: block; font-size: 0.65rem; font-weight: 700; color: #64748b; margin-bottom: 0.5rem; text-transform: uppercase; }
-        .input-field { 
-          flex: 1; 
-          padding: 0.5rem; 
-          border: 1px solid #334155; 
-          border-radius: 0.25rem; 
-          font-size: 0.85rem; 
-          outline: none; 
-          background: #1e293b; 
-          color: #0ea5e9;
+        .mc-btn:hover:not(:disabled) { background: #475569; }
+        .mc-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .mc-btn-primary { background: linear-gradient(135deg, #2563eb, #1d4ed8); border: none; color: white; }
+        .mc-btn-primary:hover:not(:disabled) { box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3); background: linear-gradient(135deg, #2563eb, #1d4ed8); }
+        .mc-badge {
+          padding: 0.2rem 0.6rem; border-radius: 0.25rem; font-size: 0.65rem;
+          font-weight: 800; text-transform: uppercase;
+        }
+        .mc-badge.on { background: rgba(16, 185, 129, 0.1); color: #10b981; border: 1px solid #10b981; }
+        .mc-badge.off { background: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid #ef4444; }
+        .mc-jog {
+          display: grid;
+          grid-template-columns: 3.4rem 3.4rem 3.4rem;
+          grid-template-rows: 3.4rem 3.4rem 3.4rem;
+          gap: 0.4rem;
+          justify-content: center;
+          margin: 0.5rem 0 0.75rem;
+        }
+        .mc-jog-btn {
+          border-radius: 0.5rem; border: 1px solid #475569; background: #0f172a;
+          color: #38bdf8; font-size: 1.15rem; font-weight: 800; cursor: pointer;
+          transition: all 0.15s; display: flex; align-items: center; justify-content: center;
+        }
+        .mc-jog-btn:hover:not(:disabled) { border-color: #0ea5e9; background: #172554; }
+        .mc-jog-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+        .mc-jog-center {
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          font-size: 0.6rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em;
+          border: 1px dashed #334155; border-radius: 0.5rem;
+        }
+        .mc-axis-legend { display: flex; justify-content: center; gap: 1.25rem; font-size: 0.68rem; color: #64748b; margin-bottom: 0.75rem; }
+        .mc-input {
+          flex: 1; padding: 0.55rem; border: 1px solid #334155; border-radius: 0.35rem;
+          font-size: 0.9rem; outline: none; background: #0f172a; color: #38bdf8;
           font-family: 'JetBrains Mono', monospace;
         }
-        .btn-update-steps { 
-          padding: 0.5rem 1rem; 
-          background-color: #0ea5e9; 
-          color: white; 
+        .mc-input:focus { border-color: #0ea5e9; }
+        .mc-field-label { display: block; font-size: 0.66rem; font-weight: 700; color: #64748b; margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.06em; }
+        .mc-field { margin-bottom: 0.9rem; }
+        .mc-inline-note { font-size: 0.68rem; color: #64748b; margin-top: 0.3rem; }
+        .mc-progress {
+          margin-top: 0.6rem; padding: 0.5rem 0.65rem; border-radius: 0.375rem;
+          background: #0f172a; border: 1px solid #0ea5e9; font-size: 0.72rem;
+          color: #38bdf8; font-family: 'JetBrains Mono', monospace;
         }
-        .motor-buttons-group { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
-        .btn-motor { 
-          width: 100%; 
-          padding: 0.75rem; 
-          font-weight: 700; 
-          border-radius: 0.375rem; 
-          color: #ffffff; 
-          cursor: pointer; 
-          border: 1px solid rgba(255,255,255,0.1); 
-          font-size: 0.75rem;
-          text-transform: uppercase;
-          transition: all 0.2s;
+        .mc-message {
+          grid-column: 1 / -1; padding: 0.65rem 0.8rem; border-radius: 0.5rem;
+          background: #0f172a; border: 1px solid #1e293b; font-size: 0.78rem;
+          color: #94a3b8; font-family: 'JetBrains Mono', monospace;
         }
-        .btn-motor:hover:not(:disabled) { background-color: rgba(255,255,255,0.1); }
-        .btn-motor.blue { background-color: #1e293b; color: #3b82f6; border-color: #3b82f6; }
-        .btn-motor.purple { background-color: #1e293b; color: #a855f7; border-color: #a855f7; }
-        .btn-motor.green { background-color: #1e293b; color: #10b981; border-color: #10b981; }
-        .btn-motor.red { background-color: #1e293b; color: #ef4444; border-color: #ef4444; }
-        .btn-motor.yellow { background-color: #1e293b; color: #f59e0b; border-color: #f59e0b; }
-        .btn-motor.orange { background: linear-gradient(135deg, #f97316, #ea580c); color: white; border: none; }
-        
-        .btn-motor.cyan { background-color: #1e293b; color: #06b6d4; border-color: #06b6d4; }
-        .btn-motor.cyan.active { background-color: #06b6d4; color: #083344; box-shadow: 0 0 15px rgba(6, 182, 212, 0.4); }
-        
-        .btn-motor.teal { background: linear-gradient(135deg, #0ea5e9, #0284c7); color: white; border: none; }
-        .btn-motor.teal:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3); }
-
-        .well-test-progress { 
-          margin-top: 0.5rem; 
-          padding: 0.5rem; 
-          border-radius: 0.375rem; 
-          background-color: #0f172a; 
-          border: 1px solid #0ea5e9; 
-          font-size: 0.7rem; 
-          color: #0ea5e9; 
-          font-family: 'JetBrains Mono', monospace;
+        .mc-light-btn {
+          width: 100%; padding: 0.7rem; border-radius: 0.4rem; font-weight: 800;
+          font-size: 0.75rem; text-transform: uppercase; cursor: pointer; transition: all 0.15s;
+          background: #0f172a; color: #06b6d4; border: 1px solid #06b6d4;
         }
-
-        .loading-spinner { display: inline-block; animation: spin 1s linear infinite; border: 2px solid rgba(14, 165, 233, 0.1); border-top-color: #0ea5e9; border-radius: 50%; height: 1.25rem; width: 1.25rem; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .mc-light-btn.active { background: #06b6d4; color: #083344; box-shadow: 0 0 15px rgba(6, 182, 212, 0.4); }
+        .mc-light-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .mc-capture-btn {
+          width: 100%; padding: 0.7rem; border-radius: 0.4rem; font-weight: 800;
+          font-size: 0.75rem; text-transform: uppercase; cursor: pointer;
+          background: linear-gradient(135deg, #f97316, #ea580c); color: white; border: none;
+          transition: all 0.15s;
+        }
+        .mc-capture-btn:hover:not(:disabled) { box-shadow: 0 4px 12px rgba(249, 115, 22, 0.35); }
+        .mc-capture-btn:disabled { opacity: 0.5; cursor: not-allowed; }
       `}</style>
 
-      <div className="card">
-        <h1 className="title">Stepper Motor Control</h1>
-
-        <div className="status-block">
-          <div className="status-header">
-            <span className="status-label">Status:</span>
-            <span className={`status-indicator ${connected ? 'connected' : 'disconnected'}`}>
-              {connected ? 'Connected' : 'Disconnected'}
-            </span>
+      <div className="mc-grid">
+        {/* ---- Connection ---- */}
+        <div className="mc-card">
+          <h2 className="mc-card-title">Connection</h2>
+          <p className="mc-card-hint">
+            Links the backend to the Arduino stepper controller over USB serial.
+            Connect once per session before moving the stage.
+          </p>
+          <div className="mc-row" style={{ justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+            <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Arduino</span>
+            <span className={`mc-badge ${connected ? 'on' : 'off'}`}>{connected ? 'Connected' : 'Disconnected'}</span>
           </div>
-          <div className="flex-buttons-group">
-            <button onClick={handleConnect} disabled={pendingAction === 'connect' || connected} className="btn btn-connect">Connect</button>
-            <button onClick={handleDisconnect} disabled={pendingAction === 'disconnect' || !connected} className="btn btn-disconnect">Disconnect</button>
-          </div>
-        </div>
-
-        {/* --- NEW BLUE LIGHT SECTION --- */}
-        <div className="status-block">
-          <label className="input-label">Manual Light Control:</label>
-          <div className="flex-buttons-group">
+          <div className="mc-row">
             <button
-              onClick={() => handleBlueLightToggle(blueLightOn ? 'off' : 'on')}
-              className={`btn-motor cyan ${blueLightOn ? 'active' : ''}`}
-              disabled={pendingAction === 'light'}
+              onClick={handleConnect}
+              disabled={pendingAction === 'connect' || connected}
+              className="mc-btn mc-btn-primary"
+              title="Open the serial connection to the Arduino stepper controller"
             >
-              {blueLightOn ? 'BLUE LIGHT: ON' : 'BLUE LIGHT: OFF'}
+              Connect
+            </button>
+            <button
+              onClick={handleDisconnect}
+              disabled={pendingAction === 'disconnect' || !connected}
+              className="mc-btn"
+              title="Close the serial connection (motors stay in their current position)"
+            >
+              Disconnect
+            </button>
+          </div>
+          <div className="mc-row" style={{ marginTop: '0.5rem' }}>
+            <button
+              onClick={() => sendMotorCommand('enable')}
+              disabled={jogDisabled}
+              className="mc-btn"
+              title="Energize the stepper motors so they hold position and can move"
+            >
+              Enable motors
+            </button>
+            <button
+              onClick={() => sendMotorCommand('disable')}
+              disabled={jogDisabled}
+              className="mc-btn"
+              title="De-energize the motors: they stop holding position and can be moved by hand"
+            >
+              Disable motors
             </button>
           </div>
         </div>
 
-        <div className="input-section">
-          <label className="input-label">Camera Exposure Time (us):</label>
-          <div className="flex-buttons-group">
-            <input type="number" value={manualExposure} onChange={(e) => setManualExposure(parseInt(e.target.value) || 0)} className="input-field" min="1000" />
-            <button onClick={() => setMessage(`Exposure set to ${manualExposure} us`)} className="btn btn-update-steps">Set</button>
+        {/* ---- Illumination + Camera ---- */}
+        <div className="mc-card">
+          <h2 className="mc-card-title">Illumination &amp; Camera</h2>
+          <p className="mc-card-hint">
+            The blue light illuminates the current well. Captures save to
+            Pictures &rarr; ManualControl_Snapshot.
+          </p>
+          <div className="mc-field">
+            <button
+              onClick={() => handleBlueLightToggle(blueLightOn ? 'off' : 'on')}
+              className={`mc-light-btn ${blueLightOn ? 'active' : ''}`}
+              disabled={pendingAction === 'light'}
+              title={blueLightOn
+                ? 'Turn the blue excitation light off'
+                : 'Turn the blue excitation light on (stays on until turned off)'}
+            >
+              {blueLightOn ? 'Blue light: ON — click to turn off' : 'Blue light: OFF — click to turn on'}
+            </button>
+          </div>
+          <div className="mc-field">
+            <label className="mc-field-label" htmlFor="mc-exposure">Exposure time (microseconds)</label>
+            <div className="mc-row">
+              <input
+                id="mc-exposure"
+                type="number"
+                value={manualExposure}
+                onChange={(e) => setManualExposure(parseInt(e.target.value) || 0)}
+                className="mc-input"
+                min="1000"
+                title="How long the camera sensor collects light for each capture. 50,000 us = 1/20 s."
+              />
+            </div>
+            <div className="mc-inline-note">Longer exposure = brighter image. Typical range: 10,000–100,000 &micro;s.</div>
+          </div>
+          <button
+            onClick={handleTakePicture}
+            disabled={pendingAction === 'picture' || !connected}
+            className="mc-capture-btn"
+            title="Capture one full-resolution image at the exposure above and save it on the backend"
+          >
+            {pendingAction === 'picture' ? 'Capturing…' : 'Take picture'}
+          </button>
+        </div>
+
+        {/* ---- Stage jog ---- */}
+        <div className="mc-card">
+          <h2 className="mc-card-title">Stage Jog</h2>
+          <p className="mc-card-hint">
+            Moves the plate by the step amount below. X moves along a row
+            (A1&rarr;A2). Rows are changed by the coupled Z+Y axes (A1&rarr;B1).
+          </p>
+          <div className="mc-jog">
+            <span />
+            <button
+              className="mc-jog-btn"
+              disabled={jogDisabled}
+              onClick={() => sendMotorCommand('zy-backward')}
+              title="Previous row: move Z+Y backward by the step amount (e.g. B1 back to A1)"
+              aria-label="Row up (Z+Y backward)"
+            >
+              &#9650;
+            </button>
+            <span />
+            <button
+              className="mc-jog-btn"
+              disabled={jogDisabled}
+              onClick={() => sendMotorCommand('x-backward')}
+              title="Move X backward by the step amount (e.g. A2 back to A1)"
+              aria-label="X backward"
+            >
+              &#9664;
+            </button>
+            <div className="mc-jog-center">
+              <span>{steps}</span>
+              <span>steps</span>
+            </div>
+            <button
+              className="mc-jog-btn"
+              disabled={jogDisabled}
+              onClick={() => sendMotorCommand('x-forward')}
+              title="Move X forward by the step amount (e.g. A1 to A2)"
+              aria-label="X forward"
+            >
+              &#9654;
+            </button>
+            <span />
+            <button
+              className="mc-jog-btn"
+              disabled={jogDisabled}
+              onClick={() => sendMotorCommand('zy-forward')}
+              title="Next row: move Z+Y forward by the step amount (e.g. A1 to B1)"
+              aria-label="Row down (Z+Y forward)"
+            >
+              &#9660;
+            </button>
+            <span />
+          </div>
+          <div className="mc-axis-legend">
+            <span>&#9664; &#9654; X axis (columns)</span>
+            <span>&#9650; &#9660; Z+Y axes (rows)</span>
+          </div>
+          <div className="mc-field">
+            <label className="mc-field-label" htmlFor="mc-steps">Step amount (motor steps per jog)</label>
+            <div className="mc-row">
+              <input
+                id="mc-steps"
+                type="number"
+                value={steps}
+                onChange={(e) => setSteps(e.target.value)}
+                className="mc-input"
+                min="1"
+                title="How many motor steps each arrow press moves. 400 steps is roughly one well pitch."
+              />
+              <button
+                onClick={updateSteps}
+                disabled={pendingAction === 'steps'}
+                className="mc-btn"
+                style={{ flex: '0 0 auto' }}
+                title="Send the new step amount to the Arduino"
+              >
+                Apply
+              </button>
+            </div>
+            <div className="mc-inline-note">Applied to all jog moves and remembered between sessions.</div>
           </div>
         </div>
 
-        <div className="input-section">
-          <label className="input-label">Step Amount (Current: {steps}):</label>
-          <div className="flex-buttons-group">
-            <input type="number" value={steps} onChange={(e) => setSteps(e.target.value)} className="input-field" min="1" />
-            <button onClick={updateSteps} disabled={pendingAction === 'steps'} className="btn btn-update-steps">Update</button>
+        {/* ---- Diagnostics ---- */}
+        <div className="mc-card">
+          <h2 className="mc-card-title">Diagnostics</h2>
+          <p className="mc-card-hint">
+            Quick hardware checks. Run these after wiring changes or if moves
+            look wrong.
+          </p>
+          <div className="mc-row" style={{ flexDirection: 'column', gap: '0.5rem' }}>
+            <button
+              onClick={() => sendMotorCommand('test')}
+              disabled={jogDisabled}
+              className="mc-btn"
+              style={{ width: '100%' }}
+              title="Fire the firmware's built-in self test: each axis pulses briefly"
+            >
+              Test motors
+            </button>
+            <button
+              onClick={handleWellTest}
+              disabled={jogDisabled}
+              className="mc-btn"
+              style={{ width: '100%' }}
+              title="Trace a small square: A1 to A2 to B1 and back home. Confirms both axes and directions."
+            >
+              Well navigation test (A1 &rarr; A2 &rarr; B1 &rarr; home)
+            </button>
           </div>
+          {wellTestProgress && <div className="mc-progress">{wellTestProgress}</div>}
         </div>
 
-        <div className="motor-buttons-group">
-          <button onClick={() => sendMotorCommand('x-forward')} disabled={motionBusy || !connected} className="btn-motor blue">X Forward</button>
-          <button onClick={() => sendMotorCommand('x-backward')} disabled={motionBusy || !connected} className="btn-motor blue">X Backward</button>
-          <button onClick={() => sendMotorCommand('zy-forward')} disabled={motionBusy || !connected} className="btn-motor purple">Z+Y Forward</button>
-          <button onClick={() => sendMotorCommand('zy-backward')} disabled={motionBusy || !connected} className="btn-motor purple">Z+Y Backward</button>
-          <div className="flex-buttons-group">
-            <button onClick={() => sendMotorCommand('enable')} disabled={motionBusy || !connected} className="btn-motor green">Enable</button>
-            <button onClick={() => sendMotorCommand('disable')} disabled={motionBusy || !connected} className="btn-motor red">Disable</button>
-          </div>
-          <button onClick={handleTakePicture} disabled={pendingAction === 'picture' || !connected} className="btn-motor orange">Take Picture</button>
-          <button onClick={() => sendMotorCommand('test')} disabled={motionBusy || !connected} className="btn-motor yellow">Test Motors</button>
-          <button onClick={handleWellTest} disabled={motionBusy || !connected} className="btn-motor teal">Well Test (A1 to A2 to B1 to Home)</button>
-          {wellTestProgress && <div className="well-test-progress">{wellTestProgress}</div>}
-        </div>
-
-        {message && <div className="message-display"><p className="message-text">{message}</p></div>}
-        {loading && <div className="mt-4 text-center"><div className="loading-spinner"></div></div>}
+        {message && <div className="mc-message">{message}</div>}
       </div>
     </div>
   );

@@ -9,6 +9,7 @@ from collections import deque
 from datetime import datetime
 import glob
 import io
+import mimetypes
 import os
 import sqlite3
 import subprocess
@@ -715,7 +716,7 @@ routine_runner = RoutineRunner()
 # --------------------------------------------------------------------------
 # Bump when routes change so a stale Pi deploy is obvious from the browser:
 # open <backend-url>/ and compare against this file.
-BACKEND_VERSION = "2026-07-10.6"
+BACKEND_VERSION = "2026-07-11.1"
 
 
 @app.route("/", methods=["GET"])
@@ -1321,6 +1322,26 @@ def pictures_download():
         mimetype="application/zip",
         as_attachment=True,
         download_name=f"{current_dir.name or 'pictures'}.zip",
+    )
+
+
+@app.route("/pictures/file", methods=["GET"])
+def pictures_file():
+    """Serve a single picture inline so the browser can display it without
+    downloading. Same path-safety rules as the other /pictures routes."""
+    try:
+        relative_path, target = _safe_child(PICTURES_DIR, request.args.get("path", ""))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 403
+    if not relative_path or not target.is_file():
+        return jsonify({"error": f"File not found: {relative_path or '(none)'}"}), 404
+    mimetype, _ = mimetypes.guess_type(target.name)
+    return send_file(
+        target,
+        mimetype=mimetype or "application/octet-stream",
+        as_attachment=False,
+        max_age=3600,
+        conditional=True,
     )
 
 
